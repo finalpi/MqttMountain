@@ -1,6 +1,6 @@
 {
   "name": "mqtt-mountain",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "高性能 MQTT 客户端（Electron + Vue 3 + TS）",
   "main": "dist-electron/main/index.js",
   "author": "",
@@ -38,17 +38,31 @@
     "appId": "com.mountain.mqtt",
     "productName": "MqttMountain",
     "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",
-    "directories": { "output": "release" },
-    "asarUnpack": ["**/node_modules/better-sqlite3/**/*"],
+    "directories": {
+      "output": "release"
+    },
+    "asarUnpack": [
+      "**/node_modules/better-sqlite3/**/*"
+    ],
     "files": [
       "dist",
       "dist-electron"
     ],
     "extraResources": [
-      { "from": "build/icon.png", "to": "icon.png" }
+      {
+        "from": "build/icon.png",
+        "to": "icon.png"
+      }
     ],
     "win": {
-      "target": [{ "target": "nsis", "arch": ["x64"] }],
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
       "icon": "build/icon.png"
     },
     "nsis": {
@@ -56,11 +70,26 @@
       "allowToChangeInstallationDirectory": true
     },
     "mac": {
-      "target": [{ "target": "dmg", "arch": ["x64", "arm64"] }],
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ],
       "icon": "build/icon.png"
     },
     "linux": {
-      "target": [{ "target": "AppImage", "arch": ["x64"] }],
+      "target": [
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
       "icon": "build/icon.png"
     }
   }
