@@ -1,4 +1,4 @@
-# MqttMountain
+# MQTTMountain
 
 一款高性能的跨平台 MQTT 桌面客户端，基于 **Electron + Vue 3 + TypeScript**。专为**超大数据量**场景打造，百万级消息稳定不卡。
 
@@ -77,7 +77,7 @@ npm run build:dir
 ```
 
 产物在 `release/` 目录下：
-- `MqttMountain-<version>-win-x64.exe` — NSIS 安装包
+- `MQTTMountain-<version>-win-x64.exe` — NSIS 安装包
 - `win-unpacked/` — 免安装版
 
 ### CI / CD
@@ -103,7 +103,7 @@ git push origin v1.0.0
 ## 目录结构
 
 ```
-MqttMountain/
+MQTTMountain/
 ├── electron/
 │   ├── main/                   # 主进程
 │   │   ├── index.ts            # 入口 / 窗口
@@ -123,9 +123,9 @@ MqttMountain/
 
 ## 数据目录
 
-- Windows: `%APPDATA%\MqttMountain\`
-- macOS: `~/Library/Application Support/MqttMountain/`
-- Linux: `~/.config/MqttMountain/`
+- Windows: `%APPDATA%\MQTTMountain\`
+- macOS: `~/Library/Application Support/MQTTMountain/`
+- Linux: `~/.config/MQTTMountain/`
 
 下分：
 - `mqtt_mountain.db` — 连接配置 & 应用设置

@@ -36,7 +36,7 @@ const brokerLine = computed(() => {
         <div class="brand">
             <div class="logo">🔺</div>
             <div class="title">
-                <div class="name">MqttMountain</div>
+                <div class="name">MQTTMountain</div>
                 <div class="subtitle">高性能 MQTT 客户端</div>
             </div>
         </div>

@@ -47,7 +47,7 @@ async function createWindow() {
         height: 960,
         minWidth: 1200,
         minHeight: 760,
-        title: 'MqttMountain',
+        title: 'MQTTMountain',
         icon: resolveIconPath(),
         backgroundColor: '#0f172a',
         webPreferences: {

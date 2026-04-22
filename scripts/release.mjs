@@ -73,5 +73,5 @@ run('git push');
 run(`git push origin v${next}`);
 
 console.log(`\n✓ 已发布 v${next}`);
-console.log('  查看 CI：https://github.com/finalpi/MqttMountain/actions');
-console.log(`  查看 Release：https://github.com/finalpi/MqttMountain/releases/tag/v${next}`);
+console.log('  查看 CI：https://github.com/finalpi/MQTTMountain/actions');
+console.log(`  查看 Release：https://github.com/finalpi/MQTTMountain/releases/tag/v${next}`);

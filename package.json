@@ -1,5 +1,5 @@
 {
-  "name": "mqtt-mountain",
+  "name": "mqttmountain",
   "version": "1.0.5",
   "description": "高性能 MQTT 客户端（Electron + Vue 3 + TS）",
   "main": "dist-electron/main/index.js",
@@ -36,7 +36,7 @@
   },
   "build": {
     "appId": "com.mountain.mqtt",
-    "productName": "MqttMountain",
+    "productName": "MQTTMountain",
     "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",
     "directories": {
       "output": "release"
