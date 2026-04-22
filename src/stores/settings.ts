@@ -4,7 +4,7 @@ import type { AppSettings } from '@shared/types';
 
 const DEFAULT: AppSettings = {
     autoDeleteDays: 0,
-    maxMemoryMessages: 2000,
+    maxMemoryMessages: 10000,
     maxPerTopic: 500,
     logDir: ''
 };

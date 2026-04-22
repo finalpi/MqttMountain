@@ -33,11 +33,12 @@ export interface TopicView {
  */
 export const useMessageStore = defineStore('messages', () => {
     // markRaw：RingBuffer 内部自维护 version/total，不应被 Vue 深层代理
-    const timeline = markRaw(new RingBuffer<MsgRow>(2000));
+    const timeline = markRaw(new RingBuffer<MsgRow>(10000));
     const timelineVersion = ref(0);
     const topics = markRaw(new Map<string, TopicView>());
     const topicsVersion = ref(0);
     const selectedTopic = ref<string | null>(null);
+    const activeConnectionId = ref<string | null>(null);
     const paused = ref(false);
     const receiveCount = ref(0);
     const publishCount = ref(0);
@@ -158,12 +159,17 @@ export const useMessageStore = defineStore('messages', () => {
         topicsVersion.value++;
     }
 
+    function setActiveConnection(id: string | null): void {
+        activeConnectionId.value = id;
+    }
+
     return {
         timeline,
         timelineVersion,
         topics,
         topicsVersion,
         selectedTopic,
+        activeConnectionId,
         paused,
         receiveCount,
         publishCount,
@@ -177,6 +183,7 @@ export const useMessageStore = defineStore('messages', () => {
         selectTopic,
         setTopicDisabled,
         pushPublishHistory,
-        hydrate
+        hydrate,
+        setActiveConnection
     };
 });

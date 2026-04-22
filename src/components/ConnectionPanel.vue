@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch, nextTick } from 'vue';
+import { computed, ref, watch } from 'vue';
 import { useConnectionStore } from '@/stores/connection';
 import { useMessageStore } from '@/stores/messages';
 import { useToast } from '@/composables/useToast';
@@ -15,6 +15,7 @@ const fileInput = ref<HTMLInputElement | null>(null);
 
 const selected = computed(() => conn.selected);
 const isConnected = computed(() => conn.selectedState === 'connected' || conn.selectedState === 'reconnecting');
+const isWs = computed(() => selected.value?.protocol === 'ws://' || selected.value?.protocol === 'wss://');
 
 function defaultPortFor(p: MqttProtocol): number {
     switch (p) {
@@ -62,9 +63,11 @@ async function doConnect(): Promise<void> {
         if (sub.paused) continue;
         await window.api.mqttSubscribe({ connectionId: c.id, topic: sub.topic, qos: sub.qos });
     }
-    // 恢复最近消息
+    // 切换消息区数据源到当前连接：清空 + 从日志恢复最近 2000 条
+    msg.clearAll();
     const recent = await window.api.mqttReadRecent({ connectionId: c.id, limit: 2000 });
     if (recent.success && recent.data) msg.hydrate(recent.data);
+    msg.setActiveConnection(c.id);
     toast.success('已连接');
 }
 
@@ -73,6 +76,8 @@ async function doDisconnect(): Promise<void> {
     if (!c) return;
     await window.api.mqttDisconnect(c.id);
     conn.setState(c.id, 'closed');
+    msg.setActiveConnection(null);
+    msg.clearAll();
     toast.info('已断开');
 }
 
@@ -81,12 +86,9 @@ function newConn(): void {
     toast.success('已新增连接：' + c.name);
 }
 
-async function selectConn(id: string): Promise<void> {
+function selectConn(id: string): void {
     conn.select(id);
-    msg.clearAll();
-    await nextTick();
-    const r = await window.api.mqttReadRecent({ connectionId: id, limit: 2000 });
-    if (r.success && r.data) msg.hydrate(r.data);
+    // 只切换配置，不动消息区：消息区永远显示 activeConnectionId 对应的连接
 }
 
 function removeConn(id: string): void {
@@ -200,27 +202,23 @@ watch(
                         <label>服务器地址</label>
                         <input :value="selected.host" @input="conn.update(selected.id, { host: ($event.target as HTMLInputElement).value })" placeholder="broker.emqx.io" />
                     </div>
-                    <div class="field-row">
-                        <div class="field">
-                            <label>端口</label>
-                            <input type="number" :value="selected.port" @input="conn.update(selected.id, { port: Number(($event.target as HTMLInputElement).value) })" />
-                        </div>
-                        <div class="field">
-                            <label>路径</label>
-                            <input :value="selected.path" @input="conn.update(selected.id, { path: ($event.target as HTMLInputElement).value })" placeholder="/mqtt" />
-                        </div>
+                    <div class="field">
+                        <label>端口</label>
+                        <input type="number" :value="selected.port" @input="conn.update(selected.id, { port: Number(($event.target as HTMLInputElement).value) })" />
                     </div>
-                    <div class="field-row">
-                        <div class="field">
-                            <label>用户名</label>
-                            <input :value="selected.username" @input="conn.update(selected.id, { username: ($event.target as HTMLInputElement).value })" />
-                        </div>
-                        <div class="field">
-                            <label>密码</label>
-                            <div class="password">
-                                <input :type="showPassword ? 'text' : 'password'" :value="selected.password" @input="conn.update(selected.id, { password: ($event.target as HTMLInputElement).value })" />
-                                <button type="button" class="btn btn-mini btn-ghost" @click="showPassword = !showPassword">{{ showPassword ? '🙈' : '👁️' }}</button>
-                            </div>
+                    <div v-if="isWs" class="field">
+                        <label>路径（WebSocket）</label>
+                        <input :value="selected.path" @input="conn.update(selected.id, { path: ($event.target as HTMLInputElement).value })" placeholder="/mqtt" />
+                    </div>
+                    <div class="field">
+                        <label>用户名</label>
+                        <input :value="selected.username" @input="conn.update(selected.id, { username: ($event.target as HTMLInputElement).value })" />
+                    </div>
+                    <div class="field">
+                        <label>密码</label>
+                        <div class="password">
+                            <input :type="showPassword ? 'text' : 'password'" :value="selected.password" @input="conn.update(selected.id, { password: ($event.target as HTMLInputElement).value })" />
+                            <button type="button" class="btn btn-mini btn-ghost" @click="showPassword = !showPassword">{{ showPassword ? '🙈' : '👁️' }}</button>
                         </div>
                     </div>
                     <div class="field">
@@ -301,6 +299,8 @@ watch(
             overflow: hidden;
             text-overflow: ellipsis;
             white-space: nowrap;
+            user-select: text;
+            cursor: text;
         }
     }
     .btn.btn-ghost {
@@ -316,6 +316,7 @@ watch(
     gap: 8px;
     min-width: 0;
     overflow-y: auto;
+    overflow-x: hidden;
     padding-right: 2px;
 
     &.placeholder {
@@ -331,14 +332,32 @@ watch(
     }
 }
 .password {
-    display: flex;
-    gap: 4px;
-    align-items: center;
+    position: relative;
+    display: block;
+
     input {
-        flex: 1;
+        width: 100%;
+        padding-right: 36px;
     }
+
     button {
-        padding: 6px 8px;
+        position: absolute;
+        right: 4px;
+        top: 50%;
+        transform: translateY(-50%);
+        padding: 3px 6px;
+        font-size: 13px;
+        line-height: 1;
+        background: transparent;
+        border: none;
+        opacity: 0.7;
+        transition: opacity 0.12s, background 0.12s;
+
+        &:hover {
+            opacity: 1;
+            background: var(--card-hover-bg);
+            border-radius: 4px;
+        }
     }
 }
 .actions {

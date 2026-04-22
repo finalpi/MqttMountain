@@ -241,11 +241,19 @@ onBeforeUnmount(() => stop());
 }
 
 .right {
-    overflow-y: auto;
-    padding-right: 4px;
+    overflow: hidden;
+    padding-right: 2px;
 
     :deep(> .panel) {
         flex: 0 0 auto;
+    }
+    /* 当前展开的那一项撑满剩余空间；body 内部自行滚动 */
+    :deep(> .panel.open) {
+        flex: 1 1 0;
+        min-height: 0;
+    }
+    :deep(> .panel.open > .panel-body) {
+        overflow-y: auto;
     }
 }
 

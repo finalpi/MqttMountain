@@ -9,7 +9,7 @@ const DEFAULT_LOG_ROOT = path.join(app.getPath('userData'), 'message_logs');
 
 const DEFAULT_SETTINGS: AppSettings = {
     autoDeleteDays: 0,
-    maxMemoryMessages: 2000,
+    maxMemoryMessages: 10000,
     maxPerTopic: 500,
     logDir: ''
 };

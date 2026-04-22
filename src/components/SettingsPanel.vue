@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { computed } from 'vue';
 import { useSettingsStore } from '@/stores/settings';
 import { useMessageStore } from '@/stores/messages';
 import { useToast } from '@/composables/useToast';
@@ -7,7 +8,8 @@ import { useUiPrefs } from '@/composables/useUiPrefs';
 const settings = useSettingsStore();
 const msg = useMessageStore();
 const toast = useToast();
-const { prefs } = useUiPrefs();
+const { prefs, toggleRight } = useUiPrefs();
+const isOpen = computed(() => prefs.activeRight === 'settings');
 
 async function save(): Promise<void> {
     const r = await settings.save();
@@ -37,13 +39,13 @@ function setFontSize(v: number): void {
 </script>
 
 <template>
-    <section class="panel" :class="{ collapsed: !prefs.settingsOpen }">
-        <div class="panel-head clickable" @click="prefs.settingsOpen = !prefs.settingsOpen">
+    <section class="panel" :class="{ open: isOpen }">
+        <div class="panel-head clickable" @click="toggleRight('settings')">
             <h2>⚙️ 设置</h2>
             <span class="spacer"></span>
-            <span class="chev">{{ prefs.settingsOpen ? '▾' : '▸' }}</span>
+            <span class="chev">{{ isOpen ? '▾' : '▸' }}</span>
         </div>
-        <div v-if="prefs.settingsOpen" class="panel-body">
+        <div v-if="isOpen" class="panel-body">
             <div class="field">
                 <label>消息字号（{{ prefs.fontSize }} px）</label>
                 <div class="fs-row">

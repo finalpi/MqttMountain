@@ -10,6 +10,18 @@ import { exportMqttxJson, exportGroupedZip } from '@/utils/exporter';
 
 const formatViewer = useFormatViewer();
 
+const isActiveView = computed(() =>
+    !!msg.activeConnectionId && msg.activeConnectionId === conn.selectedId
+);
+
+const mismatchTip = computed(() => {
+    if (!conn.selectedId) return { emoji: '🔌', title: '还没有选择连接', desc: '请在「📡 连接管理」中选择或新建一个连接' };
+    if (!msg.activeConnectionId) return { emoji: '⚡', title: '该连接未建立', desc: '点击「🔌 连接」后可在此查看实时消息，或切换到「🔍 历史查询」查看已记录消息' };
+    const active = conn.list.find((c) => c.id === msg.activeConnectionId)?.name ?? msg.activeConnectionId;
+    const current = conn.selected?.name ?? '';
+    return { emoji: '🔀', title: `当前实时连接：${active}`, desc: `你正在查看「${current}」的配置；若要查看它的实时消息，请先切换过去并点击「连接」` };
+});
+
 type ViewMode = 'timeline' | 'topic';
 const viewMode = ref<ViewMode>('topic');
 const filterInput = ref('');
@@ -219,6 +231,13 @@ onUnmounted(() => window.removeEventListener('click', closeContext));
             <button class="btn btn-mini btn-danger" @click="clearAll" title="清空">🗑️</button>
         </div>
         <div class="panel-body">
+            <div v-if="!isActiveView" class="mismatch">
+                <div class="emoji">{{ mismatchTip.emoji }}</div>
+                <div class="title">{{ mismatchTip.title }}</div>
+                <div class="desc">{{ mismatchTip.desc }}</div>
+            </div>
+
+            <template v-else>
             <div class="filter-row">
                 <input v-model="filterInput" placeholder="🔍 过滤主题或内容（忽略空格）..." class="filter-input" />
                 <button
@@ -315,6 +334,7 @@ onUnmounted(() => window.removeEventListener('click', closeContext));
                 </button>
                 <button @click="deleteTopic(contextMenu.topic!); closeContext()">删除主题</button>
             </div>
+            </template>
         </div>
     </section>
 </template>
@@ -326,6 +346,34 @@ onUnmounted(() => window.removeEventListener('click', closeContext));
 .panel-body {
     min-height: 0;
     position: relative;
+}
+
+.mismatch {
+    flex: 1;
+    min-height: 0;
+    display: grid;
+    place-items: center;
+    padding: 40px 24px;
+    text-align: center;
+    color: var(--text-2);
+
+    .emoji {
+        font-size: 56px;
+        margin-bottom: 14px;
+        opacity: 0.8;
+    }
+    .title {
+        font-size: 16px;
+        font-weight: 600;
+        color: var(--text-0);
+        margin-bottom: 8px;
+    }
+    .desc {
+        font-size: 12px;
+        color: var(--text-2);
+        line-height: 1.6;
+        max-width: 440px;
+    }
 }
 .mode-toggle {
     display: inline-flex;
@@ -495,6 +543,8 @@ onUnmounted(() => window.removeEventListener('click', closeContext));
         color: var(--text-0);
         line-height: 1.45;
         word-break: break-all;
+        user-select: text;
+        cursor: text;
     }
     .t-meta {
         display: flex;
@@ -570,6 +620,8 @@ onUnmounted(() => window.removeEventListener('click', closeContext));
             word-break: break-all;
             line-height: 1.4;
             font-size: var(--fs-msg-topic);
+            user-select: text;
+            cursor: text;
         }
         .msg-hint {
             margin-left: auto;

@@ -7,9 +7,10 @@ import type { SubscriptionConfig } from '@shared/types';
 
 const conn = useConnectionStore();
 const toast = useToast();
-const { prefs } = useUiPrefs();
+const { prefs, toggleRight } = useUiPrefs();
 const topic = ref('test/#');
 const qos = ref<0 | 1 | 2>(0);
+const isOpen = computed(() => prefs.activeRight === 'sub');
 
 const selected = computed(() => conn.selected);
 const canOp = computed(() => conn.selectedState === 'connected');
@@ -80,16 +81,16 @@ const hasPaused = computed(() => (selected.value?.subscriptions ?? []).some((s) 
 </script>
 
 <template>
-    <section class="panel" :class="{ collapsed: !prefs.subOpen }">
-        <div class="panel-head clickable" @click="prefs.subOpen = !prefs.subOpen">
+    <section class="panel" :class="{ open: isOpen }">
+        <div class="panel-head clickable" @click="toggleRight('sub')">
             <h2>📬 订阅管理</h2>
             <span class="pill" v-if="selected">{{ (selected.subscriptions ?? []).length }}</span>
             <span class="spacer"></span>
-            <button v-if="prefs.subOpen && hasActive" class="btn btn-mini" :disabled="!canOp" @click.stop="pauseAll" title="暂停全部">⏸️ 全部</button>
-            <button v-if="prefs.subOpen && hasPaused" class="btn btn-mini" :disabled="!canOp" @click.stop="resumeAll" title="恢复全部">▶️ 全部</button>
-            <span class="chev">{{ prefs.subOpen ? '▾' : '▸' }}</span>
+            <button v-if="isOpen && hasActive" class="btn btn-mini" :disabled="!canOp" @click.stop="pauseAll" title="暂停全部">⏸️ 全部</button>
+            <button v-if="isOpen && hasPaused" class="btn btn-mini" :disabled="!canOp" @click.stop="resumeAll" title="恢复全部">▶️ 全部</button>
+            <span class="chev">{{ isOpen ? '▾' : '▸' }}</span>
         </div>
-        <div v-if="prefs.subOpen" class="panel-body">
+        <div v-if="isOpen" class="panel-body">
             <div class="row">
                 <div class="field" style="flex: 1">
                     <label>主题</label>
@@ -153,8 +154,6 @@ const hasPaused = computed(() => (selected.value?.subscriptions ?? []).some((s) 
     display: flex;
     flex-direction: column;
     gap: 4px;
-    max-height: 220px;
-    overflow-y: auto;
 }
 .item {
     display: flex;
@@ -188,6 +187,8 @@ const hasPaused = computed(() => (selected.value?.subscriptions ?? []).some((s) 
         line-height: 1.45;
         word-break: break-all;
         white-space: pre-wrap;
+        user-select: text;
+        cursor: text;
     }
 
     .tag-paused {

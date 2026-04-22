@@ -438,6 +438,8 @@ onMounted(init);
         color: var(--text-0);
         line-height: 1.45;
         word-break: break-all;
+        user-select: text;
+        cursor: text;
     }
     .t-meta {
         display: flex;

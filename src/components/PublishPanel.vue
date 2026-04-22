@@ -1,22 +1,104 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue';
+import { ref, computed, nextTick } from 'vue';
 import { useConnectionStore } from '@/stores/connection';
 import { useMessageStore } from '@/stores/messages';
 import { useToast } from '@/composables/useToast';
 import { useUiPrefs } from '@/composables/useUiPrefs';
-import { shortTime, prettyJson } from '@/utils/format';
+import { shortTime } from '@/utils/format';
 
 const conn = useConnectionStore();
 const msg = useMessageStore();
 const toast = useToast();
-const { prefs } = useUiPrefs();
+const { prefs, toggleRight } = useUiPrefs();
+const isOpen = computed(() => prefs.activeRight === 'pub');
 
 const topic = ref('test/message');
 const qos = ref<0 | 1 | 2>(0);
 const retain = ref(false);
 const payload = ref('{"msg": "hello"}');
+const payloadEl = ref<HTMLTextAreaElement | null>(null);
 
 const canOp = computed(() => conn.selectedState === 'connected');
+
+/** JSON 语法校验，返回合法性 + 行列定位 */
+interface JsonStatus {
+    level: 'empty' | 'ok' | 'err';
+    kind?: string;
+    line?: number;
+    col?: number;
+    pos?: number;
+    message?: string;
+}
+
+const jsonStatus = computed<JsonStatus>(() => {
+    const s = payload.value;
+    if (!s || !s.trim()) return { level: 'empty' };
+    try {
+        const v = JSON.parse(s);
+        let kind: string;
+        if (v === null) kind = 'null';
+        else if (Array.isArray(v)) kind = `array (${v.length} 项)`;
+        else if (typeof v === 'object') kind = `object (${Object.keys(v).length} 个字段)`;
+        else kind = typeof v;
+        return { level: 'ok', kind };
+    } catch (err) {
+        const raw = (err as Error).message || '';
+        // V8: "Unexpected token } in JSON at position 15"
+        // Firefox/SpiderMonkey: "JSON.parse: ... at line 2 column 5"
+        let line = 0;
+        let col = 0;
+        let pos = -1;
+        const mPos = raw.match(/position (\d+)/);
+        const mLine = raw.match(/line (\d+) column (\d+)/i);
+        if (mLine) {
+            line = Number(mLine[1]);
+            col = Number(mLine[2]);
+        } else if (mPos) {
+            pos = Number(mPos[1]);
+            const before = s.slice(0, pos);
+            const parts = before.split('\n');
+            line = parts.length;
+            col = parts[parts.length - 1].length + 1;
+        }
+        // 只保留错误类型简短描述
+        const clean = raw
+            .replace(/^JSON\.parse:\s*/i, '')
+            .replace(/\s*in JSON at position \d+/i, '')
+            .replace(/\s*at line \d+ column \d+.*$/i, '')
+            .replace(/\s*\(line \d+ column \d+.*\)$/i, '')
+            .trim();
+        return { level: 'err', line, col, pos, message: clean };
+    }
+});
+
+function focusError(): void {
+    const el = payloadEl.value;
+    const st = jsonStatus.value;
+    if (!el || st.level !== 'err') return;
+    el.focus();
+    let pos = st.pos ?? -1;
+    if (pos < 0 && st.line && st.col) {
+        const lines = payload.value.split('\n');
+        pos = 0;
+        for (let i = 0; i < (st.line! - 1) && i < lines.length; i++) pos += lines[i].length + 1;
+        pos += (st.col! - 1);
+    }
+    if (pos >= 0) {
+        el.setSelectionRange(pos, Math.min(pos + 1, payload.value.length));
+    }
+}
+
+function tryFormat(): void {
+    const s = payload.value;
+    if (!s.trim()) return;
+    try {
+        payload.value = JSON.stringify(JSON.parse(s), null, 2);
+        nextTick(() => payloadEl.value?.focus());
+    } catch {
+        toast.error('不是合法 JSON，无法格式化');
+        focusError();
+    }
+}
 
 async function doPublish(): Promise<void> {
     const c = conn.selected;
@@ -45,10 +127,6 @@ function repeat(item: { topic: string; payload: string; qos: number; retain: boo
     retain.value = item.retain;
 }
 
-function tryFormat(): void {
-    payload.value = prettyJson(payload.value);
-}
-
 const historyList = computed(() => {
     void msg.publishHistoryVersion;
     return msg.publishHistory.snapshot().reverse();
@@ -56,13 +134,13 @@ const historyList = computed(() => {
 </script>
 
 <template>
-    <section class="panel" :class="{ collapsed: !prefs.pubOpen }">
-        <div class="panel-head clickable" @click="prefs.pubOpen = !prefs.pubOpen">
+    <section class="panel" :class="{ open: isOpen }">
+        <div class="panel-head clickable" @click="toggleRight('pub')">
             <h2>📤 发布消息</h2>
             <span class="spacer"></span>
-            <span class="chev">{{ prefs.pubOpen ? '▾' : '▸' }}</span>
+            <span class="chev">{{ isOpen ? '▾' : '▸' }}</span>
         </div>
-        <div v-if="prefs.pubOpen" class="panel-body">
+        <div v-if="isOpen" class="panel-body">
             <div class="field">
                 <label>目标主题</label>
                 <input v-model="topic" placeholder="test/topic" />
@@ -85,10 +163,34 @@ const historyList = computed(() => {
                 </div>
             </div>
             <div class="field">
-                <label>消息内容
-                    <button class="btn btn-mini btn-ghost" style="float: right" @click="tryFormat">🪄 格式化</button>
+                <label class="payload-label">
+                    <span>消息内容</span>
+                    <button class="btn btn-mini btn-ghost" @click="tryFormat">🪄 格式化</button>
                 </label>
-                <textarea v-model="payload" rows="5"></textarea>
+                <textarea
+                    ref="payloadEl"
+                    v-model="payload"
+                    rows="5"
+                    spellcheck="false"
+                    :class="['payload-input', `is-${jsonStatus.level}`]"
+                ></textarea>
+                <div class="payload-status" :class="`is-${jsonStatus.level}`">
+                    <template v-if="jsonStatus.level === 'ok'">
+                        <span class="icon">✓</span>
+                        <span>合法 JSON · {{ jsonStatus.kind }}</span>
+                    </template>
+                    <template v-else-if="jsonStatus.level === 'err'">
+                        <span class="icon">⚠</span>
+                        <span class="loc" @click="focusError" title="点击跳转到错误位置">
+                            第 {{ jsonStatus.line }} 行 第 {{ jsonStatus.col }} 列
+                        </span>
+                        <span class="msg">{{ jsonStatus.message }}</span>
+                    </template>
+                    <template v-else>
+                        <span class="icon dim">·</span>
+                        <span>内容为空</span>
+                    </template>
+                </div>
             </div>
             <button class="btn btn-primary" :disabled="!canOp" @click="doPublish">发布</button>
 
@@ -120,13 +222,82 @@ const historyList = computed(() => {
     }
 }
 
+.payload-label {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+.payload-input {
+    transition: border-color 0.15s, box-shadow 0.15s;
+
+    &.is-err {
+        border-color: rgba(239, 68, 68, 0.55) !important;
+        &:focus {
+            box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.2) !important;
+        }
+    }
+    &.is-ok {
+        border-color: rgba(16, 185, 129, 0.35) !important;
+    }
+}
+
+.payload-status {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    border-radius: 6px;
+    font-size: 11px;
+    line-height: 1.4;
+    font-family: inherit;
+    min-height: 26px;
+
+    .icon {
+        font-weight: 700;
+        font-size: 13px;
+        line-height: 1;
+    }
+
+    &.is-ok {
+        background: rgba(16, 185, 129, 0.12);
+        color: #10b981;
+        border: 1px solid rgba(16, 185, 129, 0.3);
+    }
+    &.is-err {
+        background: rgba(239, 68, 68, 0.1);
+        color: #f87171;
+        border: 1px solid rgba(239, 68, 68, 0.3);
+        flex-wrap: wrap;
+
+        .loc {
+            font-family: 'JetBrains Mono', Consolas, monospace;
+            font-weight: 600;
+            cursor: pointer;
+            text-decoration: underline;
+            text-decoration-style: dotted;
+            text-underline-offset: 3px;
+            &:hover {
+                color: #fca5a5;
+            }
+        }
+        .msg {
+            color: var(--text-2);
+            font-family: 'JetBrains Mono', Consolas, monospace;
+        }
+    }
+    &.is-empty {
+        color: var(--text-3);
+        .icon.dim { color: var(--text-3); }
+    }
+}
+
 .history {
     margin-top: 6px;
     display: flex;
     flex-direction: column;
     gap: 4px;
-    max-height: 220px;
-    overflow-y: auto;
 
     > label {
         font-size: 11px;
