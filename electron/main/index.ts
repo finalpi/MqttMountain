@@ -18,6 +18,12 @@ process.env.APP_ROOT = path.join(__dirname, '../..');
 const VITE_DEV_SERVER_URL = process.env.VITE_DEV_SERVER_URL;
 const RENDERER_DIST = path.join(process.env.APP_ROOT, 'dist');
 
+function resolveIconPath(): string {
+    return app.isPackaged
+        ? path.join(process.resourcesPath, 'icon.png')
+        : path.join(process.env.APP_ROOT!, 'build', 'icon.png');
+}
+
 let win: BrowserWindow | null = null;
 let mqttService: MqttService | null = null;
 export { APP_START_TIME } from './constants';
@@ -32,6 +38,7 @@ async function createWindow() {
         minWidth: 1200,
         minHeight: 760,
         title: 'MqttMountain',
+        icon: resolveIconPath(),
         backgroundColor: '#0f172a',
         webPreferences: {
             preload: path.join(__dirname, '../preload/index.js'),
