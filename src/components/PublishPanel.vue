@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, nextTick } from 'vue';
+import { ref, computed, nextTick, watch } from 'vue';
 import { useConnectionStore } from '@/stores/connection';
 import { useMessageStore } from '@/stores/messages';
 import { useToast } from '@/composables/useToast';
@@ -16,10 +16,6 @@ const { prefs, toggleRight } = useUiPrefs();
 const plugins = usePluginStore();
 const paramMem = useParamMemory();
 const isOpen = computed(() => prefs.activeRight === 'pub');
-
-function datalistId(paramKey: string): string {
-    return `mm-paramlist-${paramKey}`;
-}
 
 const topic = ref('test/message');
 const qos = ref<0 | 1 | 2>(0);
@@ -159,14 +155,6 @@ const paramValues = ref<Record<string, string>>({});
 const paramSuggestionCache = ref<Record<string, string[]>>({});
 const activeSender = ref<(SenderDefinition & { pluginId: string; pluginName: string }) | null>(null);
 
-function cloudSnFromTopic(topicText: string | undefined): string | undefined {
-    const parts = String(topicText || '').split('/');
-    if ((parts[0] === 'thing' || parts[0] === 'sys') && parts[1] === 'product' && parts[2]) {
-        return parts[2];
-    }
-    return undefined;
-}
-
 function suggestionListFor(paramKey: string): string[] {
     const values = new Set<string>();
     const addAll = (items: Array<string | undefined>): void => {
@@ -175,32 +163,7 @@ function suggestionListFor(paramKey: string): string[] {
         }
     };
 
-    if (paramKey === 'airportSn') {
-        addAll(paramMem.suggestionsFor('airportSn'));
-        addAll(paramMem.suggestionsFor('gateway'));
-    } else {
-        addAll(paramMem.suggestionsFor(paramKey));
-    }
-
-    const bucket = msg.bucketFor(conn.selectedId);
-    void bucket.timelineVersion;
-    void bucket.publishHistoryVersion;
-
-    if (paramKey === 'airportSn' || paramKey === 'droneSn') {
-        for (const row of bucket.timeline.snapshot()) {
-            const meta = row.decoded?.meta;
-            if (!meta || meta.family !== 'dji-shangyun') continue;
-            if (paramKey === 'airportSn' && typeof meta.airportSn === 'string') values.add(meta.airportSn);
-            if (paramKey === 'droneSn' && typeof meta.droneSn === 'string') values.add(meta.droneSn);
-        }
-    }
-
-    if (paramKey === 'airportSn') {
-        for (const item of bucket.publishHistory.snapshot()) {
-            const sn = cloudSnFromTopic(item.topic);
-            if (sn) values.add(sn);
-        }
-    }
+    addAll(paramMem.suggestionsFor(paramKey));
 
     return [...values];
 }
@@ -235,6 +198,35 @@ function onParamInput(): void {
     topic.value = applyTemplate(s.topic, paramValues.value);
     payload.value = applyTemplate(s.payloadTemplate, paramValues.value);
 }
+
+function onSuggestionPick(paramKey: string, value: string): void {
+    if (!value) return;
+    paramValues.value[paramKey] = value;
+    onParamInput();
+}
+
+watch(
+    () => paramMem.state.data,
+    () => {
+        const s = activeSender.value;
+        if (!s) return;
+        let changed = false;
+        for (const pr of s.params ?? []) {
+            const suggestions = suggestionListFor(pr.key);
+            const latest = suggestions[0];
+            if (!latest) continue;
+            const current = paramValues.value[pr.key];
+            const previousSuggestions = paramSuggestionCache.value[pr.key] ?? [];
+            paramSuggestionCache.value[pr.key] = suggestions;
+            if (!current || previousSuggestions.includes(current)) {
+                paramValues.value[pr.key] = latest;
+                changed = true;
+            }
+        }
+        if (changed) onParamInput();
+    },
+    { deep: true }
+);
 
 const historyList = computed(() => {
     const b = msg.bucketFor(conn.selectedId);
@@ -273,18 +265,23 @@ const historyList = computed(() => {
                     <select v-if="p.type === 'select'" v-model="paramValues[p.key]" @change="onParamInput">
                         <option v-for="opt in (p.options ?? [])" :key="opt" :value="opt">{{ opt }}</option>
                     </select>
+                    <select
+                        v-else-if="p.type !== 'number' && (paramSuggestionCache[p.key] ?? []).length"
+                        class="suggestion-select"
+                        :value="(paramSuggestionCache[p.key] ?? []).includes(paramValues[p.key]) ? paramValues[p.key] : ''"
+                        @change="onSuggestionPick(p.key, ($event.target as HTMLSelectElement).value)"
+                    >
+                        <option value="" disabled>选择历史</option>
+                        <option v-for="v in (paramSuggestionCache[p.key] ?? [])" :key="v" :value="v">{{ v }}</option>
+                    </select>
                     <input
                         v-else
                         :type="p.type === 'number' ? 'number' : 'text'"
                         v-model="paramValues[p.key]"
                         :placeholder="p.placeholder"
-                        :list="p.type === 'number' ? undefined : datalistId(p.key)"
                         @input="onParamInput"
                         @focus="paramSuggestionCache[p.key] = suggestionListFor(p.key)"
                     />
-                    <datalist v-if="p.type !== 'number' && p.type !== 'select'" :id="datalistId(p.key)">
-                        <option v-for="v in (paramSuggestionCache[p.key] ?? [])" :key="v" :value="v" />
-                    </datalist>
                 </div>
             </div>
 

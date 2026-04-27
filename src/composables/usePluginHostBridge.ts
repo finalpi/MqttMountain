@@ -18,6 +18,7 @@ declare global {
                 message?: string;
                 time?: number;
             }>;
+            rememberParams: (values: Record<string, unknown>) => void;
         };
     }
 }
@@ -26,6 +27,14 @@ export function installPluginHostBridge(): () => void {
     const conn = useConnectionStore();
     const msg = useMessageStore();
     const paramMem = useParamMemory();
+
+    function paramSuggestionsSnapshot(): Record<string, string[]> {
+        const out: Record<string, string[]> = {};
+        for (const [key, values] of Object.entries(paramMem.state.data)) {
+            out[key] = values.slice();
+        }
+        return out;
+    }
 
     window.__MM_PLUGIN_HOST_BRIDGE__ = {
         getSnapshot() {
@@ -41,12 +50,7 @@ export function installPluginHostBridge(): () => void {
                 })),
                 messages: bucket.timeline.snapshot(),
                 publishHistory: bucket.publishHistory.snapshot(),
-                paramSuggestions: {
-                    sn: paramMem.suggestionsFor('sn'),
-                    airportSn: paramMem.suggestionsFor('airportSn'),
-                    gateway: paramMem.suggestionsFor('gateway'),
-                    droneSn: paramMem.suggestionsFor('droneSn')
-                }
+                paramSuggestions: paramSuggestionsSnapshot()
             };
         },
         async publish(p) {
@@ -74,6 +78,17 @@ export function installPluginHostBridge(): () => void {
             msg.pushPublishHistory(connectionId, item);
             await window.api.publishHistoryAppend({ connectionId, ...item });
             return { success: true, time };
+        },
+        rememberParams(values) {
+            for (const [key, value] of Object.entries(values)) {
+                if (Array.isArray(value)) {
+                    for (let i = value.length - 1; i >= 0; i--) {
+                        paramMem.remember(key, value[i]);
+                    }
+                } else {
+                    paramMem.remember(key, value);
+                }
+            }
         }
     };
 

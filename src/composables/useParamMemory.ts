@@ -13,7 +13,7 @@ import { reactive, watch } from 'vue';
  */
 
 const STORAGE_KEY = 'mm_param_memory';
-const MAX_PER_KEY = 20;
+const MAX_PER_KEY = 100;
 
 interface State {
     data: Record<string, string[]>;

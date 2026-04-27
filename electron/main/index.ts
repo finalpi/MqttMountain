@@ -73,6 +73,8 @@ async function createWindow() {
         await win.loadFile(path.join(RENDERER_DIST, 'index.html'));
     }
 
+    win.maximize();
+
     // 关闭后台节流，避免渲染进程被 Chromium 降级后 IME 事件丢失
     win.webContents.setBackgroundThrottling(false);
 
