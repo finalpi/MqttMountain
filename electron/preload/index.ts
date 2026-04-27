@@ -59,6 +59,13 @@ const api = {
     pluginDecodeBatch: (items: { topic: string; payload: string }[]) =>
         invoke<(DecodedResult | null)[]>('plugin:decodeBatch', items),
     pluginTopicLabels: (topics: string[]) => invoke<Record<string, string>>('plugin:topicLabels', topics),
+    pluginSenderParamAction: (p: {
+        pluginId: string;
+        senderId: string;
+        paramKey: string;
+        actionId: string;
+        params: Record<string, string>;
+    }) => invoke<string | number | boolean>('plugin:senderParamAction', p),
     pluginOpenDir: () => invoke('plugin:openDir'),
     pluginsDir: () => invoke<string>('plugin:pluginsDir'),
     pluginChooseLocalDir: () => invoke<{ path: string } | null>('plugin:chooseLocalDir'),

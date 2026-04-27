@@ -50,6 +50,18 @@ export interface PluginWebViewDefinition {
 
 export type PluginViewDefinition = PluginBuiltinViewDefinition | PluginWebViewDefinition;
 
+export interface SenderParamAction {
+    id: string;
+    label: string;
+}
+
+export interface SenderParamActionRequest {
+    senderId: string;
+    paramKey: string;
+    actionId: string;
+    params: Record<string, string>;
+}
+
 /** 插件发送模板的一个参数 */
 export interface SenderParam {
     key: string;
@@ -60,6 +72,7 @@ export interface SenderParam {
     default?: string | number | boolean;
     placeholder?: string;
     required?: boolean;
+    actions?: SenderParamAction[];
 }
 
 /** 预定义发送模板。topic / payloadTemplate 支持 `{paramKey}` 占位符 */
@@ -137,6 +150,9 @@ export interface PluginRuntime {
      * 当宿主需要批量给主题列打标签时优先调用它。
      */
     topicLabel?: (topic: string) => string | null;
+
+    /** 点击 sender 参数动作按钮时调用，返回要填入该参数的值。 */
+    senderParamAction?: (request: SenderParamActionRequest) => string | number | boolean | Promise<string | number | boolean>;
 
     /** 激活时调用（用户启用插件后、第一次使用前触发一次） */
     activate?: (ctx: PluginContext) => void | Promise<void>;

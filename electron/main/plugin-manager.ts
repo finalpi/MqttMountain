@@ -304,6 +304,17 @@ class PluginManager {
         return map;
     }
 
+    async senderParamAction(
+        pluginId: string,
+        request: { senderId: string; paramKey: string; actionId: string; params: Record<string, string> }
+    ): Promise<string | number | boolean> {
+        const p = this.plugins.get(pluginId);
+        if (!p || !p.enabled || !p.loaded || !p.runtime?.senderParamAction) {
+            throw new Error('插件未提供参数动作：' + pluginId);
+        }
+        return await p.runtime.senderParamAction(request);
+    }
+
     // --------------- install / uninstall ---------------
     async installFromGit(url: string, ref?: string): Promise<PluginRecord> {
         if (!url || !url.trim()) throw new Error('Git URL 不能为空');

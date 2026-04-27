@@ -7,7 +7,7 @@ import { useUiPrefs } from '@/composables/useUiPrefs';
 import { usePluginStore } from '@/stores/plugins';
 import { useParamMemory } from '@/composables/useParamMemory';
 import { shortTime } from '@/utils/format';
-import type { SenderDefinition } from '@shared/plugin';
+import type { SenderDefinition, SenderParamAction } from '@shared/plugin';
 
 const conn = useConnectionStore();
 const msg = useMessageStore();
@@ -205,6 +205,32 @@ function onSuggestionPick(paramKey: string, value: string): void {
     onParamInput();
 }
 
+function actionLabel(action: SenderParamAction): string {
+    return action.label;
+}
+
+function fillParamValue(paramKey: string, value: string): void {
+    paramValues.value[paramKey] = value;
+    onParamInput();
+}
+
+async function runParamAction(paramKey: string, action: SenderParamAction): Promise<void> {
+    const s = activeSender.value;
+    if (!s) return;
+    const result = await window.api.pluginSenderParamAction({
+        pluginId: s.pluginId,
+        senderId: s.id,
+        paramKey,
+        actionId: action.id,
+        params: { ...paramValues.value }
+    });
+    if (!result.success) {
+        toast.error(result.message || '参数动作执行失败');
+        return;
+    }
+    fillParamValue(paramKey, String(result.data ?? ''));
+}
+
 watch(
     () => paramMem.state.data,
     () => {
@@ -256,11 +282,20 @@ const historyList = computed(() => {
                 <div v-for="p in activeSender.params" :key="p.key" class="field">
                     <label>
                         <span>{{ p.label }}{{ p.required ? ' *' : '' }}</span>
-                        <span
-                            v-if="p.type !== 'select' && (paramSuggestionCache[p.key] ?? []).length"
-                            class="mem-tag"
-                            :title="(paramSuggestionCache[p.key] ?? []).join('\n')"
-                        >🕘 {{ (paramSuggestionCache[p.key] ?? []).length }} 条历史</span>
+                        <span class="param-actions">
+                            <span
+                                v-if="p.type !== 'select' && (paramSuggestionCache[p.key] ?? []).length"
+                                class="mem-tag"
+                                :title="(paramSuggestionCache[p.key] ?? []).join('\n')"
+                            >🕘 {{ (paramSuggestionCache[p.key] ?? []).length }} 条历史</span>
+                            <button
+                                v-for="action in (p.actions ?? [])"
+                                :key="action.id"
+                                type="button"
+                                class="btn btn-mini param-action"
+                                @click="runParamAction(p.key, action)"
+                            >{{ actionLabel(action) }}</button>
+                        </span>
                     </label>
                     <select v-if="p.type === 'select'" v-model="paramValues[p.key]" @change="onParamInput">
                         <option v-for="opt in (p.options ?? [])" :key="opt" :value="opt">{{ opt }}</option>
@@ -376,6 +411,17 @@ const historyList = computed(() => {
         justify-content: space-between;
         align-items: baseline;
         gap: 8px;
+    }
+    .param-actions {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        flex: 0 0 auto;
+    }
+    .param-action {
+        min-height: 22px;
+        padding: 0 7px;
+        font-size: 10px;
     }
     .mem-tag {
         font-size: 10px;

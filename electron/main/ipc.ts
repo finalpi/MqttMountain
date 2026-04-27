@@ -206,6 +206,27 @@ export function initIpc(mqttService: MqttService): void {
         try { return { success: true, data: await pluginManager.topicLabels(topics) }; }
         catch (e) { return { success: false, message: (e as Error).message }; }
     });
+    ipcMain.handle('plugin:senderParamAction', async (_e, p: {
+        pluginId: string;
+        senderId: string;
+        paramKey: string;
+        actionId: string;
+        params: Record<string, string>;
+    }) => {
+        try {
+            return {
+                success: true,
+                data: await pluginManager.senderParamAction(p.pluginId, {
+                    senderId: p.senderId,
+                    paramKey: p.paramKey,
+                    actionId: p.actionId,
+                    params: p.params
+                })
+            };
+        } catch (e) {
+            return { success: false, message: (e as Error).message };
+        }
+    });
     ipcMain.handle('plugin:openDir', async () => {
         try { await shell.openPath(pluginManager.pluginsDir); return { success: true }; }
         catch (e) { return { success: false, message: (e as Error).message }; }
