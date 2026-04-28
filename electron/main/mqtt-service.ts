@@ -16,6 +16,7 @@ interface ConnectionCtx {
     disabledTopics: Set<string>;
     priorityTopic: string | null;
     dedupe: Map<string, number>;
+    closing: boolean;
 }
 
 /**
@@ -75,7 +76,8 @@ export class MqttService {
                     client,
                     disabledTopics: new Set(p.disabledTopics || []),
                     priorityTopic: null,
-                    dedupe: new Map()
+                    dedupe: new Map(),
+                    closing: false
                 };
                 this.conns.set(p.connectionId, ctx);
 
@@ -104,14 +106,19 @@ export class MqttService {
                 client.on('reconnect', () => this.sendState(p.connectionId, 'reconnecting'));
                 client.on('offline', () => this.sendState(p.connectionId, 'offline'));
                 client.on('close', () => {
-                    this.sendState(p.connectionId, 'closed');
                     if (initialConnect && !settled) {
                         // 首次还没连上就关闭（broker 拒绝 / 网络直接断）
                         clearTimeout(hardTimeout);
                         try { client.end(true); } catch {}
                         this.conns.delete(p.connectionId);
                         settle({ success: false, message: '连接被关闭' });
+                        return;
                     }
+                    if (ctx.closing) {
+                        this.sendState(p.connectionId, 'closed');
+                        return;
+                    }
+                    this.sendState(p.connectionId, 'reconnecting');
                 });
                 client.on('error', (err) => {
                     this.sendState(p.connectionId, 'error', err.message);
@@ -163,6 +170,7 @@ export class MqttService {
     disconnect(connectionId: string): ApiResult {
         const ctx = this.conns.get(connectionId);
         if (ctx) {
+            ctx.closing = true;
             try { ctx.client.removeAllListeners(); } catch {}
             try { ctx.client.end(true); } catch {}
             this.conns.delete(connectionId);
