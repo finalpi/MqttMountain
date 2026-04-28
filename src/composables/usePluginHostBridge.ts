@@ -19,6 +19,7 @@ declare global {
                 time?: number;
             }>;
             rememberParams: (values: Record<string, unknown>) => void;
+            setParamSuggestions: (values: Record<string, unknown[]>) => void;
         };
     }
 }
@@ -88,6 +89,11 @@ export function installPluginHostBridge(): () => void {
                 } else {
                     paramMem.remember(key, value);
                 }
+            }
+        },
+        setParamSuggestions(values) {
+            for (const [key, list] of Object.entries(values)) {
+                paramMem.replaceKey(key, Array.isArray(list) ? list : []);
             }
         }
     };

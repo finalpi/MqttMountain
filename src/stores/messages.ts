@@ -217,12 +217,25 @@ export const useMessageStore = defineStore('messages', () => {
         b.paused = paused;
     }
 
-    function hydrate(connectionId: string, rows: { topic: string; payload: string; time: number }[]): void {
+    function hydrate(connectionId: string, rows: { topic: string; payload: string; time: number }[], decodedBatch?: (DecodedResult | null)[]): void {
         if (!connectionId || !rows.length) return;
         const b = bucketFor(connectionId);
         const ordered = rows.slice().sort((a, b2) => a.time - b2.time);
+        const decodedByKey = new Map<string, DecodedResult | null>();
+        if (decodedBatch?.length) {
+            for (let i = 0; i < rows.length; i++) {
+                const source = rows[i];
+                decodedByKey.set(`${source.time}:${source.topic}:${source.payload}`, decodedBatch[i] ?? null);
+            }
+        }
         for (const r of ordered) {
-            const row: MsgRow = { topic: r.topic, payload: r.payload, time: r.time, seq: nextSeq() };
+            const row: MsgRow = {
+                topic: r.topic,
+                payload: r.payload,
+                time: r.time,
+                seq: nextSeq(),
+                decoded: decodedByKey.get(`${r.time}:${r.topic}:${r.payload}`) ?? null
+            };
             b.timeline.push(row);
             const v = ensureTopic(b, r.topic);
             v.buf.push(row);

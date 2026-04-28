@@ -35,6 +35,7 @@ function load(): State {
 }
 
 const state = reactive<State>(load());
+const managedKeys = new Set<string>();
 
 watch(
     () => state.data,
@@ -58,6 +59,11 @@ function remember(key: string, value: unknown): void {
     if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s)) return;
     if (/^\d{12,}$/.test(s)) return;
     const arr = state.data[key] ?? [];
+    if (managedKeys.has(key)) {
+        if (arr.includes(s)) return;
+        state.data[key] = [...arr, s].slice(0, MAX_PER_KEY);
+        return;
+    }
     const filtered = arr.filter((x) => x !== s);
     filtered.unshift(s);
     state.data[key] = filtered.slice(0, MAX_PER_KEY);
@@ -77,6 +83,22 @@ function forgetValue(key: string, value: string): void {
     state.data[key] = arr.filter((x) => x !== value);
 }
 
+function replaceKey(key: string, values: unknown[]): void {
+    if (!key || SKIP_KEYS.has(key)) return;
+    managedKeys.add(key);
+    const clean: string[] = [];
+    const seen = new Set<string>();
+    for (const value of values) {
+        if (value == null) continue;
+        const text = String(value).trim();
+        if (!text || seen.has(text)) continue;
+        seen.add(text);
+        clean.push(text);
+        if (clean.length >= MAX_PER_KEY) break;
+    }
+    state.data[key] = clean;
+}
+
 export function useParamMemory() {
-    return { remember, suggestionsFor, forgetKey, forgetValue, state };
+    return { remember, suggestionsFor, forgetKey, forgetValue, replaceKey, state };
 }

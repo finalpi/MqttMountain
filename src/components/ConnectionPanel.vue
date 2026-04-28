@@ -87,7 +87,12 @@ async function doConnect(): Promise<void> {
         // 为该连接的 bucket 预填历史（不影响其他连接）
         msg.clearAll(c.id);
         const recent = await window.api.mqttReadRecent({ connectionId: c.id, limit: 2000 });
-        if (recent.success && recent.data) msg.hydrate(c.id, recent.data);
+        if (recent.success && recent.data) {
+            const decoded = await window.api.pluginDecodeBatch(
+                recent.data.map((item) => ({ topic: item.topic, payload: item.payload }))
+            );
+            msg.hydrate(c.id, recent.data, decoded.success ? decoded.data : undefined);
+        }
         toast.success(wasDirty ? `已连接：${label}（配置已自动保存）` : `已连接：${label}`);
     } finally {
         connecting.value = false;
