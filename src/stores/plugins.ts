@@ -1,10 +1,12 @@
 import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
-import type { PluginRecord, SenderDefinition, PluginViewDefinition } from '@shared/plugin';
+import type { PluginRecord, PluginUpdateInfo, SenderDefinition, PluginViewDefinition } from '@shared/plugin';
 
 export const usePluginStore = defineStore('plugins', () => {
     const list = ref<PluginRecord[]>([]);
+    const updates = ref<PluginUpdateInfo[]>([]);
     const loading = ref(false);
+    const checkingUpdates = ref(false);
 
     async function refresh(): Promise<void> {
         loading.value = true;
@@ -19,6 +21,7 @@ export const usePluginStore = defineStore('plugins', () => {
     const enabledPlugins = computed(() => list.value.filter((p) => p.enabled && p.loaded));
     const hasDecoder = computed(() => enabledPlugins.value.some((p) => p.hasDecoder));
     const hasTopicLabel = computed(() => enabledPlugins.value.some((p) => p.hasTopicLabel));
+    const availableUpdates = computed(() => updates.value.filter((item) => item.hasUpdate));
 
     /** 所有启用插件的 senders 拍平 + 附带来源信息 */
     const allSenders = computed<(SenderDefinition & { pluginId: string; pluginName: string })[]>(() => {
@@ -75,15 +78,37 @@ export const usePluginStore = defineStore('plugins', () => {
     async function updateFromGit(pluginId: string): Promise<{ ok: boolean; message?: string }> {
         const r = await window.api.pluginUpdateFromGit(pluginId);
         await refresh();
+        updates.value = updates.value.filter((item) => item.pluginId !== pluginId);
         return { ok: r.success, message: r.message };
+    }
+
+    async function checkUpdates(): Promise<{ ok: boolean; data: PluginUpdateInfo[]; message?: string }> {
+        checkingUpdates.value = true;
+        try {
+            const r = await window.api.pluginCheckUpdates();
+            if (r.success && r.data) {
+                updates.value = r.data;
+                return { ok: true, data: r.data };
+            }
+            return { ok: false, data: [], message: r.message };
+        } finally {
+            checkingUpdates.value = false;
+        }
+    }
+
+    function updateInfo(pluginId: string): PluginUpdateInfo | undefined {
+        return updates.value.find((item) => item.pluginId === pluginId);
     }
 
     return {
         list,
+        updates,
         loading,
+        checkingUpdates,
         enabledPlugins,
         hasDecoder,
         hasTopicLabel,
+        availableUpdates,
         allSenders,
         centerViews,
         refresh,
@@ -92,6 +117,8 @@ export const usePluginStore = defineStore('plugins', () => {
         installFromPath,
         uninstall,
         reload,
-        updateFromGit
+        updateFromGit,
+        checkUpdates,
+        updateInfo
     };
 });

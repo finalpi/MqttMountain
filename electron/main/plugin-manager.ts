@@ -20,7 +20,8 @@ import type {
     PluginRuntime,
     SenderDefinition,
     PluginInstallSource,
-    PluginViewDefinition
+    PluginViewDefinition,
+    PluginUpdateInfo
 } from '../../shared/plugin';
 
 const PLUGIN_DIR = path.join(app.getPath('userData'), 'plugins');
@@ -423,6 +424,31 @@ class PluginManager {
         await this.reload(pluginId);
     }
 
+    async checkUpdates(): Promise<PluginUpdateInfo[]> {
+        const out: PluginUpdateInfo[] = [];
+        for (const p of this.plugins.values()) {
+            if (p.source?.type !== 'git') continue;
+            try {
+                const info = await gitCheckUpdate(p.dir, p.source.ref);
+                out.push({
+                    pluginId: p.manifest.id,
+                    pluginName: p.manifest.name,
+                    ...info
+                });
+            } catch (e) {
+                out.push({
+                    pluginId: p.manifest.id,
+                    pluginName: p.manifest.name,
+                    currentRevision: '',
+                    latestRevision: '',
+                    hasUpdate: false,
+                    message: (e as Error).message
+                });
+            }
+        }
+        return out;
+    }
+
     readViewHtml(pluginId: string, viewId: string): { html: string; baseUrl: string } {
         const p = this.plugins.get(pluginId);
         if (!p) throw new Error('未找到插件：' + pluginId);
@@ -480,6 +506,44 @@ function gitPull(dir: string): Promise<void> {
             else resolve();
         });
     });
+}
+
+function gitOutput(dir: string, args: string[], timeout = 60_000): Promise<string> {
+    return new Promise((resolve, reject) => {
+        execFile('git', ['-C', dir, ...args], { windowsHide: true, timeout }, (err, stdout, stderr) => {
+            if (err) reject(new Error(stderr || err.message));
+            else resolve(String(stdout).trim());
+        });
+    });
+}
+
+async function remoteDefaultBranch(dir: string): Promise<string> {
+    const output = await gitOutput(dir, ['ls-remote', '--symref', 'origin', 'HEAD']);
+    const match = output.match(/ref:\s+refs\/heads\/([^\s]+)\s+HEAD/);
+    if (!match) throw new Error('无法识别远端默认分支');
+    return match[1];
+}
+
+async function remoteRevision(dir: string, ref?: string): Promise<{ branch?: string; revision: string }> {
+    const currentBranch = await gitOutput(dir, ['rev-parse', '--abbrev-ref', 'HEAD']);
+    const branch = currentBranch && currentBranch !== 'HEAD'
+        ? currentBranch
+        : (ref && !/^v?\d+\.\d+\.\d+/.test(ref) ? ref : await remoteDefaultBranch(dir));
+    const output = await gitOutput(dir, ['ls-remote', 'origin', `refs/heads/${branch}`]);
+    const revision = output.split(/\s+/)[0];
+    if (!revision) throw new Error(`远端分支不存在：${branch}`);
+    return { branch, revision };
+}
+
+async function gitCheckUpdate(dir: string, ref?: string): Promise<Omit<PluginUpdateInfo, 'pluginId' | 'pluginName'>> {
+    const currentRevision = await gitOutput(dir, ['rev-parse', 'HEAD']);
+    const remote = await remoteRevision(dir, ref);
+    return {
+        currentRevision,
+        latestRevision: remote.revision,
+        hasUpdate: currentRevision !== remote.revision,
+        branch: remote.branch
+    };
 }
 
 export const pluginManager = new PluginManager();

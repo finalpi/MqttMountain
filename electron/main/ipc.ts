@@ -26,6 +26,7 @@ import {
 import { APP_START_TIME } from './constants';
 import { pluginManager } from './plugin-manager';
 import { appendPublishHistory, readPublishHistory } from './publish-history';
+import { checkForUpdates, openReleasesPage } from './update-service';
 
 function win(): BrowserWindow | null {
     return BrowserWindow.getAllWindows()[0] ?? null;
@@ -141,6 +142,22 @@ export function initIpc(mqttService: MqttService): void {
         return { success: true };
     });
     ipcMain.handle('app:getStartTime', () => ({ success: true, data: APP_START_TIME }));
+    ipcMain.handle('app:getVersion', () => ({ success: true, data: app.getVersion() }));
+    ipcMain.handle('app:checkForUpdates', async () => {
+        try {
+            return { success: true, data: await checkForUpdates() };
+        } catch (e) {
+            return { success: false, message: (e as Error).message };
+        }
+    });
+    ipcMain.handle('app:openReleasesPage', async (_e, url?: string) => {
+        try {
+            await openReleasesPage(url);
+            return { success: true };
+        } catch (e) {
+            return { success: false, message: (e as Error).message };
+        }
+    });
 
     ipcMain.handle('publishHistory:read', (_e, p: { connectionId: string; limit?: number }) => {
         try {
@@ -192,6 +209,10 @@ export function initIpc(mqttService: MqttService): void {
     });
     ipcMain.handle('plugin:updateFromGit', async (_e, pluginId: string) => {
         try { await pluginManager.updateFromGit(pluginId); return { success: true }; }
+        catch (e) { return { success: false, message: (e as Error).message }; }
+    });
+    ipcMain.handle('plugin:checkUpdates', async () => {
+        try { return { success: true, data: await pluginManager.checkUpdates() }; }
         catch (e) { return { success: false, message: (e as Error).message }; }
     });
     ipcMain.handle('plugin:decode', async (_e, p: { topic: string; payload: string }) => {

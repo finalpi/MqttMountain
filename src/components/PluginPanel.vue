@@ -68,6 +68,19 @@ async function onUpdate(pluginId: string): Promise<void> {
     else toast.error(`升级失败：${r.message || ''}`);
 }
 
+async function onCheckUpdates(): Promise<void> {
+    const r = await plugins.checkUpdates();
+    if (!r.ok) {
+        toast.error(`检查失败：${r.message || ''}`);
+        return;
+    }
+    if (plugins.availableUpdates.length) {
+        toast.warning(`发现 ${plugins.availableUpdates.length} 个插件可更新`);
+    } else {
+        toast.info('插件已是最新');
+    }
+}
+
 async function onUninstall(pluginId: string, name: string): Promise<void> {
     if (!confirm(`确定卸载插件“${name}”？`)) return;
     const r = await plugins.uninstall(pluginId);
@@ -96,6 +109,9 @@ async function copyError(text: string): Promise<void> {
             <h2>插件管理</h2>
             <span class="spacer"></span>
             <button class="btn btn-mini" @click="openDir" title="打开插件目录">目录</button>
+            <button class="btn btn-mini" :disabled="plugins.checkingUpdates" @click="onCheckUpdates">
+                {{ plugins.checkingUpdates ? '检查中...' : '检查更新' }}
+            </button>
             <button class="btn btn-mini" @click="plugins.refresh()" :disabled="plugins.loading">刷新</button>
         </div>
         <div class="panel-body">
@@ -158,6 +174,11 @@ async function copyError(text: string): Promise<void> {
                         <span v-if="p.hasDecoder" class="badge">解码</span>
                         <span v-if="p.hasTopicLabel" class="badge">主题别名</span>
                         <span v-if="p.senders.length" class="badge">{{ p.senders.length }} 个模板</span>
+                        <span
+                            v-if="plugins.updateInfo(p.manifest.id)?.hasUpdate"
+                            class="badge update"
+                            :title="plugins.updateInfo(p.manifest.id)?.latestRevision"
+                        >可更新</span>
                         <span v-if="p.source?.type === 'git'" class="badge git" :title="p.source.url">Git</span>
                         <span v-else-if="p.source?.type === 'path'" class="badge">本地</span>
                     </div>
@@ -171,7 +192,7 @@ async function copyError(text: string): Promise<void> {
                             v-if="p.source?.type === 'git'"
                             class="btn btn-mini"
                             @click="onUpdate(p.manifest.id)"
-                        >升级</button>
+                        >{{ plugins.updateInfo(p.manifest.id)?.hasUpdate ? '更新' : '升级' }}</button>
                         <button
                             class="btn btn-mini btn-danger"
                             @click="onUninstall(p.manifest.id, p.manifest.name)"
@@ -301,6 +322,12 @@ async function copyError(text: string): Promise<void> {
             background: rgba(124, 92, 255, 0.16);
             color: #c4b5fd;
             border-color: rgba(124, 92, 255, 0.35);
+        }
+
+        &.update {
+            background: rgba(245, 158, 11, 0.16);
+            color: #fbbf24;
+            border-color: rgba(245, 158, 11, 0.38);
         }
     }
 

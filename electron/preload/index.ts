@@ -7,9 +7,10 @@ import type {
     HistoryMessage,
     MqttMessage,
     PublishPayload,
-    ApiResult
+    ApiResult,
+    UpdateInfo
 } from '../../shared/types';
-import type { DecodedResult, PluginRecord } from '../../shared/plugin';
+import type { DecodedResult, PluginRecord, PluginUpdateInfo } from '../../shared/plugin';
 
 const invoke = <T = unknown>(ch: string, ...args: unknown[]) =>
     ipcRenderer.invoke(ch, ...args) as Promise<ApiResult<T>>;
@@ -42,6 +43,9 @@ const api = {
 
     appRelaunch: () => invoke('app:relaunch'),
     appGetStartTime: () => invoke<number>('app:getStartTime'),
+    appGetVersion: () => invoke<string>('app:getVersion'),
+    appCheckForUpdates: () => invoke<UpdateInfo>('app:checkForUpdates'),
+    appOpenReleasesPage: (url?: string) => invoke('app:openReleasesPage', url),
     publishHistoryRead: (p: { connectionId: string; limit?: number }) =>
         invoke<Array<{ connectionId: string; topic: string; payload: string; qos: number; retain: boolean; time: number }>>('publishHistory:read', p),
     publishHistoryAppend: (row: { connectionId: string; topic: string; payload: string; qos: number; retain: boolean; time: number }) =>
@@ -55,6 +59,7 @@ const api = {
     pluginUninstall: (pluginId: string) => invoke('plugin:uninstall', pluginId),
     pluginReload: (pluginId: string) => invoke('plugin:reload', pluginId),
     pluginUpdateFromGit: (pluginId: string) => invoke('plugin:updateFromGit', pluginId),
+    pluginCheckUpdates: () => invoke<PluginUpdateInfo[]>('plugin:checkUpdates'),
     pluginDecode: (p: { topic: string; payload: string }) => invoke<DecodedResult | null>('plugin:decode', p),
     pluginDecodeBatch: (items: { topic: string; payload: string }[]) =>
         invoke<(DecodedResult | null)[]>('plugin:decodeBatch', items),

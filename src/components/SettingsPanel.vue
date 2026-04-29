@@ -4,11 +4,13 @@ import { useSettingsStore } from '@/stores/settings';
 import { useMessageStore } from '@/stores/messages';
 import { useToast } from '@/composables/useToast';
 import { useUiPrefs } from '@/composables/useUiPrefs';
+import { useUpdater } from '@/composables/useUpdater';
 
 const settings = useSettingsStore();
 const msg = useMessageStore();
 const toast = useToast();
 const { prefs, toggleRight } = useUiPrefs();
+const updater = useUpdater();
 const isOpen = computed(() => prefs.activeRight === 'settings');
 
 async function save(): Promise<void> {
@@ -31,6 +33,19 @@ function resetDir(): void {
 }
 async function openDir(): Promise<void> {
     await window.api.settingsOpenLogDir(settings.state.logDir || settings.currentLogDir);
+}
+
+async function checkUpdate(): Promise<void> {
+    const info = await updater.check();
+    if (!info) {
+        toast.error(updater.state.error || '检查更新失败');
+        return;
+    }
+    if (info.hasUpdate) {
+        toast.success(`发现新版本 v${info.latestVersion}`);
+        return;
+    }
+    toast.info(`已是最新版本 v${info.currentVersion}`);
 }
 
 function setFontSize(v: number): void {
@@ -82,6 +97,33 @@ function setFontSize(v: number): void {
                 <button class="btn btn-mini" @click="resetDir">恢复默认</button>
                 <button class="btn btn-mini" @click="openDir">打开</button>
             </div>
+            <div class="field update-field">
+                <label>软件更新</label>
+                <div class="version-list">
+                    <div class="version-line">
+                        <span>当前版本</span>
+                        <b>{{ updater.state.info ? `v${updater.state.info.currentVersion}` : '—' }}</b>
+                    </div>
+                    <div class="version-line">
+                        <span>远端最新版本</span>
+                        <b>{{ updater.state.info ? `v${updater.state.info.latestVersion}` : '未检查' }}</b>
+                    </div>
+                </div>
+                <div class="update-row">
+                    <button class="btn btn-mini" :disabled="updater.state.checking" @click="checkUpdate">
+                        {{ updater.state.checking ? '检查中…' : '检查更新' }}
+                    </button>
+                    <button
+                        v-if="updater.state.info?.hasUpdate"
+                        class="btn btn-mini btn-primary"
+                        @click="updater.openDownload"
+                    >下载</button>
+                </div>
+                <div v-if="updater.state.info?.hasUpdate" class="update-tip">
+                    最新版本 v{{ updater.state.info.latestVersion }}，点击下载前往 GitHub Releases。
+                </div>
+                <div v-else-if="updater.state.error" class="update-tip error">{{ updater.state.error }}</div>
+            </div>
             <button class="btn btn-primary" @click="save" style="margin-top: 6px">💾 保存设置</button>
         </div>
     </section>
@@ -125,5 +167,49 @@ function setFontSize(v: number): void {
     color: var(--text-1);
     font-family: 'JetBrains Mono', Consolas, monospace;
     line-height: 1.5;
+}
+
+.update-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+.version-list {
+    display: grid;
+    gap: 5px;
+    margin-bottom: 8px;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--panel-body-bg);
+}
+
+.version-line {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    font-size: 12px;
+
+    span {
+        color: var(--text-3);
+    }
+
+    b {
+        color: var(--text-0);
+        font-family: 'JetBrains Mono', Consolas, monospace;
+        font-weight: 700;
+    }
+}
+
+.update-tip {
+    margin-top: 6px;
+    color: #bae6fd;
+    font-size: 12px;
+
+    &.error {
+        color: #fecaca;
+    }
 }
 </style>

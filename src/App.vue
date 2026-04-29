@@ -11,6 +11,7 @@ import PluginWebView from './components/PluginWebView.vue';
 import SettingsPanel from './components/SettingsPanel.vue';
 import ToastHost from './components/ToastHost.vue';
 import FormatViewerModal from './components/FormatViewerModal.vue';
+import UpdateNotice from './components/UpdateNotice.vue';
 import { useConnectionStore } from './stores/connection';
 import { useMessageStore } from './stores/messages';
 import { useSettingsStore } from './stores/settings';
@@ -19,6 +20,7 @@ import { useMqttBridge } from './composables/useMqttBridge';
 import { installPluginHostBridge } from './composables/usePluginHostBridge';
 import { useToast } from './composables/useToast';
 import { useFocusFix } from './composables/useFocusFix';
+import { useUpdater } from './composables/useUpdater';
 
 const conn = useConnectionStore();
 const msg = useMessageStore();
@@ -26,6 +28,7 @@ const settings = useSettingsStore();
 const plugins = usePluginStore();
 const { start, stop } = useMqttBridge();
 const toast = useToast();
+const updater = useUpdater();
 useFocusFix();
 let teardownPluginHostBridge: (() => void) | null = null;
 
@@ -62,6 +65,12 @@ onMounted(async () => {
     );
     start();
     teardownPluginHostBridge = installPluginHostBridge();
+    void updater.check({ silent: true });
+    void plugins.checkUpdates().then((result) => {
+        if (result.ok && plugins.availableUpdates.length) {
+            toast.warning(`发现 ${plugins.availableUpdates.length} 个插件可更新`);
+        }
+    });
 
     window.api.onAutoDeleteDone((files) => {
         if (files > 0) toast.info(`已自动清理 ${files} 个过期日志文件`);
@@ -130,6 +139,7 @@ onBeforeUnmount(() => {
         </main>
         <ToastHost />
         <FormatViewerModal />
+        <UpdateNotice />
     </div>
 </template>
 

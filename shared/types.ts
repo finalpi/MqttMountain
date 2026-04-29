@@ -87,6 +87,16 @@ export interface ApiResult<T = unknown> {
     data?: T;
 }
 
+export interface UpdateInfo {
+    currentVersion: string;
+    latestVersion: string;
+    hasUpdate: boolean;
+    releaseUrl: string;
+    releaseName?: string;
+    publishedAt?: string;
+    body?: string;
+}
+
 export type IpcChannels = {
     'mqtt:connect': (p: ConnectPayload) => ApiResult;
     'mqtt:disconnect': (connectionId: string) => ApiResult;
@@ -109,6 +119,9 @@ export type IpcChannels = {
     'settings:openLogDir': (p?: string) => ApiResult;
     'app:relaunch': () => ApiResult;
     'app:getStartTime': () => ApiResult<number>;
+    'app:getVersion': () => ApiResult<string>;
+    'app:checkForUpdates': () => ApiResult<UpdateInfo>;
+    'app:openReleasesPage': (url?: string) => ApiResult;
 };
 
 export type IpcEvents = {

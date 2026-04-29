@@ -179,6 +179,16 @@ export interface PluginInstallSource {
     path?: string;     // 本地源路径
 }
 
+export interface PluginUpdateInfo {
+    pluginId: string;
+    pluginName: string;
+    currentRevision: string;
+    latestRevision: string;
+    hasUpdate: boolean;
+    branch?: string;
+    message?: string;
+}
+
 export interface PluginRecord {
     manifest: PluginManifest;
     /** 绝对路径（渲染端仅用于显示） */
