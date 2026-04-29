@@ -4,11 +4,6 @@ import { useMessageStore } from '@/stores/messages';
 import { useParamMemory } from './useParamMemory';
 import type { MqttMessage } from '@shared/types';
 
-interface PendingItem {
-    connId: string;
-    batch: MqttMessage[];
-}
-
 export function useMqttBridge() {
     const conn = useConnectionStore();
     const msg = useMessageStore();
@@ -17,7 +12,7 @@ export function useMqttBridge() {
     let unsubState: (() => void) | null = null;
     let stopWatch: (() => void) | null = null;
 
-    const pending: PendingItem[] = [];
+    const pending: MqttMessage[] = [];
     let rafId: number | null = null;
     let flushing = false;
 
@@ -26,13 +21,16 @@ export function useMqttBridge() {
         flushing = true;
         try {
             const byConn = new Map<string, MqttMessage[]>();
-            for (const it of pending.splice(0, pending.length)) {
-                let arr = byConn.get(it.connId);
+            const batch = pending.splice(0, pending.length);
+            for (let i = 0; i < batch.length; i++) {
+                const item = batch[i];
+                if (!item.connectionId) continue;
+                let arr = byConn.get(item.connectionId);
                 if (!arr) {
                     arr = [];
-                    byConn.set(it.connId, arr);
+                    byConn.set(item.connectionId, arr);
                 }
-                for (let i = 0; i < it.batch.length; i++) arr.push(it.batch[i]);
+                arr.push(item);
             }
 
             for (const [connId, list] of byConn) {
@@ -75,12 +73,11 @@ export function useMqttBridge() {
     function start(): void {
         unsubMsg = window.api.onMqttMessages((batch) => {
             if (!batch.length) return;
-            const connId = batch[0].connectionId;
-            if (!connId) return;
             if (import.meta.env.DEV) {
-                console.debug('[mqtt] batch:', connId, batch.length, batch[0]?.topic);
+                const connIds = new Set(batch.map((item) => item.connectionId).filter(Boolean));
+                console.debug('[mqtt] batch:', [...connIds].join(','), batch.length, batch[0]?.topic);
             }
-            pending.push({ connId, batch });
+            pending.push(...batch);
             schedule();
         });
 

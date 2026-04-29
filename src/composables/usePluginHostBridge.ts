@@ -2,16 +2,26 @@ import { useConnectionStore } from '@/stores/connection';
 import { useMessageStore } from '@/stores/messages';
 import { useParamMemory } from '@/composables/useParamMemory';
 
+interface PluginSnapshotOptions {
+    messageLimit?: number;
+    publishLimit?: number;
+    includeParamSuggestions?: boolean;
+}
+
 declare global {
     interface Window {
         __MM_PLUGIN_HOST_BRIDGE__?: {
-            getSnapshot: () => {
+            getSnapshot: (options?: PluginSnapshotOptions) => {
                 selectedConnectionId: string | null;
                 selectedConnectionState: string;
                 connections: Array<{ id: string; name: string; state: string }>;
                 messages: any[];
                 publishHistory: any[];
                 paramSuggestions: Record<string, string[]>;
+                timelineVersion: number;
+                publishHistoryVersion: number;
+                receiveCount: number;
+                publishCount: number;
             };
             publish: (p: { connectionId?: string; topic: string; payload: string; qos?: 0 | 1 | 2; retain?: boolean }) => Promise<{
                 success: boolean;
@@ -37,10 +47,28 @@ export function installPluginHostBridge(): () => void {
         return out;
     }
 
+    function normalizeLimit(value: unknown, fallback: number, max: number): number {
+        if (typeof value !== 'number' || !Number.isFinite(value)) return fallback;
+        return Math.max(0, Math.min(max, Math.floor(value)));
+    }
+
+    function ringSnapshotLatest<T>(buffer: { length: number; at: (index: number) => T | undefined; snapshot: () => T[] }, limit: number): T[] {
+        if (limit <= 0) return [];
+        if (limit >= buffer.length) return buffer.snapshot();
+        const start = buffer.length - limit;
+        const out = new Array<T>(limit);
+        for (let i = 0; i < limit; i++) {
+            out[i] = buffer.at(start + i) as T;
+        }
+        return out;
+    }
+
     window.__MM_PLUGIN_HOST_BRIDGE__ = {
-        getSnapshot() {
+        getSnapshot(options = {}) {
             const selectedConnectionId = conn.selectedId;
             const bucket = msg.bucketFor(selectedConnectionId);
+            const messageLimit = normalizeLimit(options.messageLimit, bucket.timeline.length, bucket.timeline.length);
+            const publishLimit = normalizeLimit(options.publishLimit, bucket.publishHistory.length, bucket.publishHistory.length);
             return {
                 selectedConnectionId,
                 selectedConnectionState: conn.selectedState,
@@ -49,9 +77,13 @@ export function installPluginHostBridge(): () => void {
                     name: item.name,
                     state: conn.states[item.id]?.state ?? 'idle'
                 })),
-                messages: bucket.timeline.snapshot(),
-                publishHistory: bucket.publishHistory.snapshot(),
-                paramSuggestions: paramSuggestionsSnapshot()
+                messages: ringSnapshotLatest(bucket.timeline, messageLimit),
+                publishHistory: ringSnapshotLatest(bucket.publishHistory, publishLimit),
+                paramSuggestions: options.includeParamSuggestions === false ? {} : paramSuggestionsSnapshot(),
+                timelineVersion: bucket.timelineVersion,
+                publishHistoryVersion: bucket.publishHistoryVersion,
+                receiveCount: bucket.receiveCount,
+                publishCount: bucket.publishCount
             };
         },
         async publish(p) {

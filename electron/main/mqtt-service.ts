@@ -19,6 +19,11 @@ interface ConnectionCtx {
     closing: boolean;
 }
 
+interface QueuePriority {
+    connectionId: string;
+    topic: string;
+}
+
 /**
  * 去重窗口：同一 (topic, payload) 在窗口内视为重复并丢弃。
  * - 2 秒足够覆盖 QoS1/2 的协议重传（一般 3-5 秒；结合 dup 标志兜底）
@@ -232,19 +237,25 @@ export class MqttService {
     // ---------- IPC batching ----------
     private enqueueIpc(msg: MqttMessage, ctx: ConnectionCtx): void {
         this.ipcQueue.push(msg);
-        if (this.ipcQueue.length > IPC_QUEUE_HARD) this.trimQueue(ctx.priorityTopic);
+        if (this.ipcQueue.length > IPC_QUEUE_HARD) {
+            this.trimQueue(ctx.priorityTopic ? { connectionId: ctx.id, topic: ctx.priorityTopic } : null);
+        }
         if (this.ipcQueue.length >= IPC_BATCH_HARD) this.flushIpc();
         else this.scheduleFlush();
     }
 
-    private trimQueue(priority: string | null): void {
+    private trimQueue(priority: QueuePriority | null): void {
         const excess = this.ipcQueue.length - IPC_QUEUE_HARD;
         if (excess <= 0) return;
         const mark = new Uint8Array(this.ipcQueue.length);
         let removed = 0;
         if (priority) {
             for (let i = 0; i < this.ipcQueue.length && removed < excess; i++) {
-                if (this.ipcQueue[i].topic !== priority) { mark[i] = 1; removed++; }
+                const item = this.ipcQueue[i];
+                if (item.connectionId !== priority.connectionId || item.topic !== priority.topic) {
+                    mark[i] = 1;
+                    removed++;
+                }
             }
         }
         if (removed < excess) {
@@ -256,7 +267,8 @@ export class MqttService {
         let k = 0;
         for (let i = 0; i < this.ipcQueue.length; i++) if (!mark[i]) kept[k++] = this.ipcQueue[i];
         this.ipcQueue = kept;
-        console.warn(`[mqtt] IPC 队列积压超限，已降采样丢弃 ${removed} 条（priority=${priority ?? 'none'}）`);
+        const priorityLabel = priority ? `${priority.connectionId}:${priority.topic}` : 'none';
+        console.warn(`[mqtt] IPC 队列积压超限，已降采样丢弃 ${removed} 条（priority=${priorityLabel}）`);
     }
 
     private scheduleFlush(): void {

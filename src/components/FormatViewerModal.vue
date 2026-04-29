@@ -11,11 +11,13 @@ const toast = useToast();
 
 const decoded = ref<DecodedResult | null>(null);
 const decoding = ref(false);
+const decodedCollapsed = ref(false);
 
 watch(
     () => [state.visible, state.raw, state.topic] as const,
     async ([vis, raw, topic]) => {
         decoded.value = null;
+        decodedCollapsed.value = false;
         if (!vis || !raw) return;
         decoding.value = true;
         try {
@@ -34,6 +36,20 @@ const matchCount = ref(0);
 
 const bodyEl = ref<HTMLElement | null>(null);
 
+interface DecodedFieldValue {
+    path: string;
+    key: string;
+    label: string;
+    value?: string;
+}
+
+interface TimestampHit {
+    raw: string;
+    unit: 's' | 'ms';
+    local: string;
+    iso: string;
+}
+
 /** 尝试 JSON 解析，失败则按原样显示 */
 const formatted = computed<{ text: string; isJson: boolean }>(() => {
     const s = state.raw;
@@ -46,24 +62,87 @@ const formatted = computed<{ text: string; isJson: boolean }>(() => {
     }
 });
 
+const decodedFieldValues = computed<DecodedFieldValue[]>(() => {
+    const detail = decoded.value as (DecodedResult & {
+        fieldValues?: DecodedFieldValue[];
+        fieldLabels?: DecodedFieldValue[];
+    }) | null;
+    const values = detail?.fieldValues || detail?.fieldLabels;
+    return Array.isArray(values) ? values.slice(0, 160) : [];
+});
+
+const decodedDisplayItems = computed(() => {
+    const out: { label: string; value: string }[] = [];
+    const seen = new Set<string>();
+    const push = (label?: string, value?: string): void => {
+        if (!label || !value) return;
+        const key = `${label}\u0000${value}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        out.push({ label, value });
+    };
+    decoded.value?.highlights?.forEach((item) => push(item.label, item.value));
+    decodedFieldValues.value.forEach((item) => push(item.label, item.value || ''));
+    return out;
+});
+
 /** 简易 JSON 语法高亮（string/number/bool/null/key） */
+function timestampToMs(value: string | number): { ms: number; unit: 's' | 'ms' } | null {
+    const text = String(value).trim();
+    if (!/^-?\d+$/.test(text)) return null;
+    const abs = text.startsWith('-') ? text.slice(1) : text;
+    const n = Number(text);
+    if (!Number.isSafeInteger(n)) return null;
+    if (abs.length === 10) return { ms: n * 1000, unit: 's' };
+    if (abs.length === 13) return { ms: n, unit: 'ms' };
+    return null;
+}
+
+function isReasonableTimestamp(ms: number): boolean {
+    return ms >= Date.UTC(2000, 0, 1) && ms <= Date.UTC(2100, 0, 1);
+}
+
+function makeTimestampHit(raw: string | number): TimestampHit | null {
+    const converted = timestampToMs(raw);
+    if (!converted || !isReasonableTimestamp(converted.ms)) return null;
+    return {
+        raw: String(raw),
+        unit: converted.unit,
+        local: formatTime(converted.ms),
+        iso: new Date(converted.ms).toISOString()
+    };
+}
+
 function colorizeJson(src: string): string {
-    const esc = escapeHtml(src);
-    return esc.replace(
+    return src.replace(
         /("(\\u[a-fA-F0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d+)?(?:[eE][+\-]?\d+)?)/g,
         (match) => {
+            const escaped = escapeHtml(match);
             if (/^"/.test(match)) {
-                if (/:$/.test(match)) return `<span class="k-key">${match}</span>`;
-                return `<span class="k-str">${match}</span>`;
+                if (/:$/.test(match)) return `<span class="k-key">${escaped}</span>`;
+                return `<span class="k-str">${escaped}</span>`;
             }
-            if (/true|false/.test(match)) return `<span class="k-bool">${match}</span>`;
-            if (/null/.test(match)) return `<span class="k-null">${match}</span>`;
-            return `<span class="k-num">${match}</span>`;
+            if (/true|false/.test(match)) return `<span class="k-bool">${escaped}</span>`;
+            if (/null/.test(match)) return `<span class="k-null">${escaped}</span>`;
+            const timestamp = makeTimestampHit(match);
+            if (timestamp) {
+                return [
+                    '<span class="k-num k-time" tabindex="0">',
+                    escaped,
+                    '<span class="time-pop">',
+                    `<span>${escapeHtml(timestamp.local)}</span>`,
+                    `<span>${escapeHtml(timestamp.iso)}</span>`,
+                    `<span>${timestamp.unit === 'ms' ? 'millisecond timestamp' : 'second timestamp'}</span>`,
+                    '</span>',
+                    '</span>'
+                ].join('');
+            }
+            return `<span class="k-num">${escaped}</span>`;
         }
     );
 }
 
-/** 在已渲染 HTML 上套搜索高亮（简单替换：遍历文本节点） */
+/** 在已渲染 HTML 上套搜索高亮（遍历文本节点） */
 function applySearchHighlights(): void {
     const el = bodyEl.value;
     if (!el) return;
@@ -172,7 +251,6 @@ function onKeydown(e: KeyboardEvent): void {
 window.addEventListener('keydown', onKeydown);
 onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown));
 
-// 内容或搜索词变化时重新高亮
 watch(
     () => [state.visible, state.raw, search.value, caseSensitive.value] as const,
     async () => {
@@ -182,7 +260,6 @@ watch(
     }
 );
 
-// 打开时重置搜索
 watch(
     () => state.visible,
     (v) => {
@@ -217,7 +294,7 @@ const title = computed(() => state.topic || '消息内容');
                             <input
                                 class="fv-search-input"
                                 v-model="search"
-                                placeholder="🔍 搜索内容（Ctrl+F / Enter）"
+                                placeholder="搜索内容（Ctrl+F / Enter）"
                                 @keydown.enter.prevent="nextMatch"
                                 @keydown.shift.enter.prevent="prevMatch"
                             />
@@ -228,15 +305,20 @@ const title = computed(() => state.topic || '消息内容');
                         </div>
 
                         <div class="fv-actions">
-                            <button class="btn btn-mini" @click="copyAll" title="复制全部">📋 复制</button>
-                            <button class="btn btn-mini btn-danger" @click="close" title="关闭 (Esc)">✕</button>
+                            <button class="btn btn-mini" @click="copyAll" title="复制全部">复制</button>
+                            <button class="btn btn-mini btn-danger" @click="close" title="关闭 (Esc)">×</button>
                         </div>
                     </header>
 
-                    <div v-if="decoded" class="fv-decoded">
-                        <div v-if="decoded.summary" class="summary">🧩 {{ decoded.summary }}</div>
-                        <div v-if="decoded.highlights && decoded.highlights.length" class="highlights">
-                            <div v-for="(h, i) in decoded.highlights" :key="i" class="hl-item">
+                    <div v-if="decoded" class="fv-decoded" :class="{ collapsed: decodedCollapsed }">
+                        <div class="decoded-head">
+                            <div v-if="decoded.summary" class="summary">{{ decoded.summary }}</div>
+                            <button class="btn btn-mini" @click="decodedCollapsed = !decodedCollapsed">
+                                {{ decodedCollapsed ? '展开' : '收起' }}
+                            </button>
+                        </div>
+                        <div v-if="!decodedCollapsed && decodedDisplayItems.length" class="highlights">
+                            <div v-for="(h, i) in decodedDisplayItems" :key="i" class="hl-item">
                                 <span class="k">{{ h.label }}</span>
                                 <span class="v">{{ h.value }}</span>
                             </div>
@@ -382,11 +464,29 @@ const title = computed(() => state.topic || '消息内容');
     display: flex;
     flex-direction: column;
     gap: 6px;
+    max-height: 180px;
+    overflow-y: auto;
+
+    &.collapsed {
+        max-height: none;
+        overflow: hidden;
+    }
+
+    .decoded-head {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        justify-content: space-between;
+    }
 
     .summary {
         font-size: 13px;
         color: var(--text-0);
         font-weight: 600;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
     }
     .highlights {
         display: flex;
@@ -407,6 +507,62 @@ const title = computed(() => state.topic || '消息内容');
                 color: var(--accent-2);
                 font-weight: 600;
             }
+        }
+    }
+
+    .field-labels {
+        margin-top: 2px;
+        color: var(--text-2);
+        font-size: 12px;
+
+        summary {
+            cursor: pointer;
+            color: #bae6fd;
+            font-weight: 700;
+            user-select: none;
+        }
+    }
+
+    .field-list {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 6px;
+        margin-top: 8px;
+        max-height: 240px;
+        overflow: auto;
+    }
+
+    .field-item {
+        display: grid;
+        grid-template-columns: minmax(150px, 0.9fr) minmax(110px, auto) minmax(160px, 1fr);
+        gap: 8px;
+        align-items: baseline;
+        border: 1px solid rgba(148, 163, 184, 0.18);
+        border-radius: 6px;
+        padding: 4px 6px;
+        background: rgba(15, 23, 42, 0.22);
+        font-family: 'JetBrains Mono', Consolas, monospace;
+
+        .path {
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            color: var(--text-3);
+        }
+
+        .label {
+            color: #bae6fd;
+            font-weight: 700;
+            white-space: nowrap;
+        }
+
+        .value {
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            color: var(--text-0);
+            font-weight: 600;
+            text-align: right;
         }
     }
 }
@@ -440,6 +596,60 @@ const title = computed(() => state.topic || '消息内容');
 }
 :deep(.k-num) {
     color: #fbbf24;
+}
+:deep(.k-time) {
+    position: relative;
+    display: inline-block;
+    border-bottom: 1px dotted rgba(251, 191, 36, 0.75);
+    cursor: help;
+}
+:deep(.k-time .time-pop) {
+    position: absolute;
+    left: 50%;
+    bottom: calc(100% + 8px);
+    z-index: 3;
+    display: none;
+    min-width: 260px;
+    max-width: 360px;
+    transform: translateX(-50%);
+    padding: 8px 10px;
+    border: 1px solid rgba(125, 211, 252, 0.35);
+    border-radius: 6px;
+    background: rgba(8, 13, 30, 0.98);
+    box-shadow: 0 14px 36px rgba(0, 0, 0, 0.38);
+    color: #bae6fd;
+    font-size: 11px;
+    line-height: 1.45;
+    pointer-events: none;
+    white-space: normal;
+    word-break: normal;
+}
+:deep(.k-time .time-pop::after) {
+    content: '';
+    position: absolute;
+    left: 50%;
+    top: 100%;
+    width: 8px;
+    height: 8px;
+    transform: translate(-50%, -4px) rotate(45deg);
+    border-right: 1px solid rgba(125, 211, 252, 0.35);
+    border-bottom: 1px solid rgba(125, 211, 252, 0.35);
+    background: rgba(8, 13, 30, 0.98);
+}
+:deep(.k-time .time-pop span) {
+    display: block;
+}
+:deep(.k-time .time-pop span:first-child) {
+    color: #fef3c7;
+    font-weight: 700;
+}
+:deep(.k-time .time-pop span:last-child) {
+    margin-top: 2px;
+    color: #94a3b8;
+}
+:deep(.k-time:hover .time-pop),
+:deep(.k-time:focus .time-pop) {
+    display: block;
 }
 :deep(.k-bool) {
     color: #f472b6;
