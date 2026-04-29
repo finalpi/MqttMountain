@@ -69,6 +69,8 @@ export interface HistoryQueryOptions {
     startTime?: number;
     endTime?: number;
     keyword?: string;
+    keywords?: string[];
+    keywordLogic?: 'and' | 'or';
     topic?: string;
     limit?: number;
     offset?: number;

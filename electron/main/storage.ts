@@ -282,13 +282,27 @@ function normalizeKeyword(k: string): string {
     return String(k).replace(/\s+/gu, '').toLowerCase();
 }
 
+function parseKeywordTerms(input: string | string[]): string[] {
+    const seen = new Set<string>();
+    const out: string[] = [];
+    const items = Array.isArray(input) ? input : [input];
+    for (const part of items) {
+        const term = normalizeKeyword(part);
+        if (!term || seen.has(term)) continue;
+        seen.add(term);
+        out.push(term);
+    }
+    return out;
+}
+
 export function queryHistory(opts: HistoryQueryOptions): HistoryMessage[] {
     flushStorage();
     const st = opts.startTime != null && opts.startTime > 0 ? opts.startTime : -8640000000000000;
     const et = opts.endTime != null && opts.endTime > 0 ? opts.endTime : 8640000000000000;
     const limit = Math.min(500_000, Math.max(1, opts.limit ?? 500));
     const offset = Math.max(0, opts.offset ?? 0);
-    const nk = opts.keyword ? normalizeKeyword(opts.keyword).trim() : '';
+    const terms = parseKeywordTerms(opts.keywords?.length ? opts.keywords : (opts.keyword ? [opts.keyword] : []));
+    const keywordLogic = opts.keywordLogic === 'or' ? 'or' : 'and';
     const topicFilter = opts.topic && opts.topic.trim() ? opts.topic.trim() : null;
 
     const files: { path: string; dk: string; san: string }[] = [];
@@ -326,9 +340,12 @@ export function queryHistory(opts: HistoryQueryOptions): HistoryMessage[] {
                 for (let j = decoded.length - 1; j >= 0; j--) {
                     const m = decoded[j];
                     if (m.time < st || m.time > et) continue;
-                    if (nk) {
+                    if (terms.length) {
                         const hay = (m.topic + m.payload).replace(/\s+/gu, '').toLowerCase();
-                        if (hay.indexOf(nk) < 0) continue;
+                        const hit = keywordLogic === 'or'
+                            ? terms.some((term) => hay.includes(term))
+                            : terms.every((term) => hay.includes(term));
+                        if (!hit) continue;
                     }
                     m.connectionId = fe.san;
                     all.push(m);

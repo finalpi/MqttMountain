@@ -4,7 +4,7 @@ import { useMessageStore, type TopicView, type MsgRow } from '@/stores/messages'
 import { useConnectionStore } from '@/stores/connection';
 import { useToast } from '@/composables/useToast';
 import { useFormatViewer } from '@/composables/useFormatViewer';
-import { normalize, highlight } from '@/utils/filter';
+import { highlight, matchesSearchTerms, normalizeSearchTerms, type SearchLogic } from '@/utils/filter';
 import { formatTime, shortTime } from '@/utils/format';
 import { exportMqttxJson, exportGroupedZip } from '@/utils/exporter';
 
@@ -28,29 +28,42 @@ const placeholderTip = computed(() => {
 
 type ViewMode = 'timeline' | 'topic';
 const viewMode = ref<ViewMode>('topic');
-const filterInput = ref('');
-const filterText = ref('');
+const filterInputs = ref<string[]>(['']);
+const activeFilterInputs = ref<string[]>(['']);
+const filterLogic = ref<SearchLogic>('and');
 
 let filterTimer: number | null = null;
-watch(filterInput, (v) => {
+watch(filterInputs, (v) => {
     if (filterTimer != null) clearTimeout(filterTimer);
-    filterTimer = window.setTimeout(() => (filterText.value = v), 120);
-});
+    filterTimer = window.setTimeout(() => (activeFilterInputs.value = [...v]), 120);
+}, { deep: true });
 onUnmounted(() => { if (filterTimer != null) clearTimeout(filterTimer); });
 
-const normKey = computed(() => normalize(filterText.value));
+const filterTerms = computed(() => normalizeSearchTerms(activeFilterInputs.value));
+
+function addFilterCondition(): void {
+    filterInputs.value.push('');
+}
+
+function removeFilterCondition(index: number): void {
+    if (filterInputs.value.length <= 1) {
+        filterInputs.value[0] = '';
+        return;
+    }
+    filterInputs.value.splice(index, 1);
+}
 
 /** 时间线：按新到旧 */
 const timelineList = computed<MsgRow[]>(() => {
     const b = bucket.value;
     void b.timelineVersion;
     const arr = b.timeline.snapshot();
-    const nk = normKey.value;
-    if (!nk) return arr.slice().reverse();
+    const terms = filterTerms.value;
+    if (terms.length === 0) return arr.slice().reverse();
     const out: MsgRow[] = [];
     for (let i = arr.length - 1; i >= 0; i--) {
         const r = arr[i];
-        if ((r.topic + r.payload).replace(/\s+/gu, '').toLowerCase().indexOf(nk) >= 0) out.push(r);
+        if (matchesSearchTerms(r.topic + r.payload, terms, filterLogic.value)) out.push(r);
     }
     return out;
 });
@@ -62,13 +75,13 @@ const topicList = computed<TopicView[]>(() => {
     const b = bucket.value;
     void b.topicsVersion;
     const all: TopicView[] = [];
-    const nk = normKey.value;
+    const terms = filterTerms.value;
     for (const v of b.topics.values()) {
-        if (nk) {
-            let hit = v.normTopic.indexOf(nk) >= 0;
+        if (terms.length) {
+            let hit = matchesSearchTerms(v.topic, terms, filterLogic.value);
             if (!hit) {
                 v.buf.forEachReverse((m) => {
-                    if ((m.topic + m.payload).replace(/\s+/gu, '').toLowerCase().indexOf(nk) >= 0) {
+                    if (matchesSearchTerms(m.topic + m.payload, terms, filterLogic.value)) {
                         hit = true;
                         return false;
                     }
@@ -110,12 +123,12 @@ const selectedTopicMessages = computed<MsgRow[]>(() => {
     const v = selectedTopicView.value;
     if (!v) return [];
     const arr = v.buf.snapshot();
-    const nk = normKey.value;
-    if (!nk) return arr.slice().reverse();
+    const terms = filterTerms.value;
+    if (terms.length === 0) return arr.slice().reverse();
     const out: MsgRow[] = [];
     for (let i = arr.length - 1; i >= 0; i--) {
         const r = arr[i];
-        if ((r.topic + r.payload).replace(/\s+/gu, '').toLowerCase().indexOf(nk) >= 0) out.push(r);
+        if (matchesSearchTerms(r.topic + r.payload, terms, filterLogic.value)) out.push(r);
     }
     return out;
 });
@@ -256,7 +269,20 @@ onUnmounted(() => window.removeEventListener('click', closeContext));
 
             <template v-else>
             <div class="filter-row">
-                <input v-model="filterInput" placeholder="🔍 过滤主题或内容（忽略空格）..." class="filter-input" />
+                <div class="filter-builder">
+                    <div class="logic-toggle">
+                        <button class="tgl" :class="{ active: filterLogic === 'and' }" @click="filterLogic = 'and'">且</button>
+                        <button class="tgl" :class="{ active: filterLogic === 'or' }" @click="filterLogic = 'or'">或</button>
+                    </div>
+                    <div class="filter-conditions">
+                        <div v-for="(_, index) in filterInputs" :key="index" class="filter-condition">
+                            <span v-if="index > 0" class="logic-label">{{ filterLogic === 'and' ? '且' : '或' }}</span>
+                            <input v-model="filterInputs[index]" placeholder="过滤主题或内容" class="filter-input" />
+                            <button class="condition-btn" title="删除条件" @click="removeFilterCondition(index)">×</button>
+                        </div>
+                        <button class="condition-add" title="添加过滤条件" @click="addFilterCondition">+ 条件</button>
+                    </div>
+                </div>
                 <button
                     class="follow-btn"
                     :class="{ active: autoFollow }"
@@ -276,10 +302,10 @@ onUnmounted(() => window.removeEventListener('click', closeContext));
                     >
                         <div class="msg-head">
                             <span class="time">{{ formatTime(m.time) }}</span>
-                            <span class="topic" v-html="highlight(m.topic, filterText)"></span>
+                            <span class="topic" v-html="highlight(m.topic, activeFilterInputs)"></span>
                             <span class="msg-hint">右键格式化</span>
                         </div>
-                        <pre class="msg-body" v-html="highlight(m.payload, filterText)"></pre>
+                        <pre class="msg-body" v-html="highlight(m.payload, activeFilterInputs)"></pre>
                     </div>
                 </div>
             </div>
@@ -306,7 +332,7 @@ onUnmounted(() => window.removeEventListener('click', closeContext));
                                 @click="selectTopic(t.topic)"
                                 @contextmenu.prevent="openContext($event, t.topic)"
                             >
-                                <div class="t-name" v-html="highlight(t.topic, filterText)"></div>
+                                <div class="t-name" v-html="highlight(t.topic, activeFilterInputs)"></div>
                                 <div class="t-meta">
                                     <span class="count">{{ t.total }} 条</span>
                                     <span class="ago">{{ shortTime(t.lastTime) }}</span>
@@ -333,7 +359,7 @@ onUnmounted(() => window.removeEventListener('click', closeContext));
                                     <span class="time">{{ formatTime(m.time) }}</span>
                                     <span class="msg-hint">右键格式化</span>
                                 </div>
-                                <pre class="msg-body" v-html="highlight(m.payload, filterText)"></pre>
+                                <pre class="msg-body" v-html="highlight(m.payload, activeFilterInputs)"></pre>
                             </div>
                         </div>
                     </div>
@@ -426,12 +452,69 @@ onUnmounted(() => window.removeEventListener('click', closeContext));
 .filter-row {
     display: flex;
     gap: 8px;
-    align-items: stretch;
+    align-items: flex-start;
     flex: 0 0 auto;
+}
+
+.filter-builder {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    gap: 8px;
+    align-items: flex-start;
+}
+
+.logic-toggle {
+    display: inline-flex;
+    flex: 0 0 auto;
+    padding: 2px;
+    background: var(--input-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+
+    .tgl {
+        background: transparent;
+        border: none;
+        color: var(--text-2);
+        font-size: 12px;
+        padding: 5px 9px;
+        border-radius: 6px;
+        cursor: pointer;
+        font-family: inherit;
+
+        &.active {
+            background: rgba(124, 92, 255, 0.28);
+            color: #fff;
+        }
+    }
+}
+
+.filter-conditions {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+.filter-condition {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    min-width: 210px;
+    flex: 1 1 240px;
+}
+
+.logic-label {
+    color: var(--text-3);
+    font-size: 12px;
+    white-space: nowrap;
 }
 
 .filter-input {
     flex: 1;
+    min-width: 0;
     padding: 8px 12px;
     background: var(--input-bg);
     border: 1px solid var(--border);
@@ -444,8 +527,34 @@ onUnmounted(() => window.removeEventListener('click', closeContext));
     }
 }
 
+.condition-btn,
+.condition-add {
+    height: 34px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--input-bg);
+    color: var(--text-2);
+    font-family: inherit;
+    cursor: pointer;
+    white-space: nowrap;
+
+    &:hover {
+        color: var(--text-0);
+        border-color: var(--border-strong);
+    }
+}
+
+.condition-btn {
+    width: 30px;
+}
+
+.condition-add {
+    padding: 0 10px;
+}
+
 .follow-btn {
     padding: 0 12px;
+    height: 34px;
     background: var(--input-bg);
     border: 1px solid var(--border);
     color: var(--text-2);

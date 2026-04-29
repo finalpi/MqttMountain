@@ -6,7 +6,7 @@ import { useFormatViewer } from '@/composables/useFormatViewer';
 import type { HistoryMessage } from '@shared/types';
 import { datetimeLocalToTs, formatTime, shortTime, tsToDatetimeLocal } from '@/utils/format';
 import { exportMqttxJson, exportGroupedZip } from '@/utils/exporter';
-import { highlight } from '@/utils/filter';
+import { highlight, type SearchLogic } from '@/utils/filter';
 
 const formatViewer = useFormatViewer();
 
@@ -15,7 +15,8 @@ const toast = useToast();
 
 const startTime = ref<string>('');
 const endTime = ref<string>('');
-const keyword = ref<string>('');
+const keywordInputs = ref<string[]>(['']);
+const keywordLogic = ref<SearchLogic>('and');
 const scope = ref<'current' | 'all'>('current');
 const rows = ref<HistoryMessage[]>([]);
 const selectedTopic = ref<string | null>(null);
@@ -60,12 +61,15 @@ const detail = computed<HistoryMessage[]>(() => {
 async function query(): Promise<void> {
     const st = datetimeLocalToTs(startTime.value);
     const et = datetimeLocalToTs(endTime.value);
+    const keywords = keywordInputs.value.map((v) => v.trim()).filter(Boolean);
     loading.value = true;
     const r = await window.api.historyQuery({
         connectionId: scope.value === 'current' ? conn.selectedId : null,
         startTime: st || undefined,
         endTime: et || undefined,
-        keyword: keyword.value.trim() || undefined,
+        keyword: keywords[0] || undefined,
+        keywords: keywords.length ? keywords : undefined,
+        keywordLogic: keywordLogic.value,
         limit: 500_000
     });
     loading.value = false;
@@ -77,6 +81,18 @@ async function query(): Promise<void> {
     } else {
         toast.error('查询失败：' + (r.message || ''));
     }
+}
+
+function addKeywordCondition(): void {
+    keywordInputs.value.push('');
+}
+
+function removeKeywordCondition(index: number): void {
+    if (keywordInputs.value.length <= 1) {
+        keywordInputs.value[0] = '';
+        return;
+    }
+    keywordInputs.value.splice(index, 1);
 }
 
 let appStart = 0;
@@ -179,9 +195,22 @@ onMounted(init);
                         <button class="btn btn-mini" @click="setEndNow(); activeQuick = ''">当前</button>
                     </div>
                 </div>
-                <div class="field">
+                <div class="field keyword-field">
                     <label>关键字</label>
-                    <input v-model="keyword" placeholder="主题或内容（忽略空格）" @keydown.enter="query" />
+                    <div class="filter-builder">
+                        <div class="logic-toggle">
+                            <button class="tgl" :class="{ active: keywordLogic === 'and' }" @click="keywordLogic = 'and'">且</button>
+                            <button class="tgl" :class="{ active: keywordLogic === 'or' }" @click="keywordLogic = 'or'">或</button>
+                        </div>
+                        <div class="filter-conditions">
+                            <div v-for="(_, index) in keywordInputs" :key="index" class="filter-condition">
+                                <span v-if="index > 0" class="logic-label">{{ keywordLogic === 'and' ? '且' : '或' }}</span>
+                                <input v-model="keywordInputs[index]" placeholder="主题或内容" @keydown.enter="query" />
+                                <button class="condition-btn" title="删除条件" @click="removeKeywordCondition(index)">×</button>
+                            </div>
+                            <button class="condition-add" title="添加过滤条件" @click="addKeywordCondition">+ 条件</button>
+                        </div>
+                    </div>
                 </div>
                 <div class="field">
                     <label>连接范围</label>
@@ -230,7 +259,7 @@ onMounted(init);
                                 :class="{ active: selectedTopic === g.topic }"
                                 @click="selectedTopic = g.topic"
                             >
-                                <div class="t-name" v-html="highlight(g.topic, keyword)"></div>
+                                <div class="t-name" v-html="highlight(g.topic, keywordInputs)"></div>
                                 <div class="t-meta">
                                     <span class="count">{{ g.items.length }} 条</span>
                                     <span class="ago">{{ shortTime(g.lastTime) }}</span>
@@ -261,7 +290,7 @@ onMounted(init);
                                     <span class="time">{{ formatTime(m.time) }}</span>
                                     <span class="msg-hint">右键格式化</span>
                                 </div>
-                                <pre class="msg-body" v-html="highlight(m.payload, keyword)"></pre>
+                                <pre class="msg-body" v-html="highlight(m.payload, keywordInputs)"></pre>
                             </div>
                         </div>
                     </div>
@@ -298,6 +327,93 @@ onMounted(init);
         height: 34px;
         padding: 0 18px;
     }
+
+    .keyword-field {
+        grid-column: span 2;
+    }
+}
+
+.filter-builder {
+    display: flex;
+    gap: 8px;
+    align-items: flex-start;
+}
+
+.logic-toggle {
+    display: inline-flex;
+    flex: 0 0 auto;
+    padding: 2px;
+    background: var(--input-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+
+    .tgl {
+        background: transparent;
+        border: none;
+        color: var(--text-2);
+        font-size: 12px;
+        padding: 5px 9px;
+        border-radius: 6px;
+        cursor: pointer;
+        font-family: inherit;
+
+        &.active {
+            background: rgba(124, 92, 255, 0.28);
+            color: #fff;
+        }
+    }
+}
+
+.filter-conditions {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+.filter-condition {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    min-width: 210px;
+    flex: 1 1 240px;
+
+    input {
+        min-width: 0;
+    }
+}
+
+.logic-label {
+    color: var(--text-3);
+    font-size: 12px;
+    white-space: nowrap;
+}
+
+.condition-btn,
+.condition-add {
+    height: 34px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--input-bg);
+    color: var(--text-2);
+    font-family: inherit;
+    cursor: pointer;
+    white-space: nowrap;
+
+    &:hover {
+        color: var(--text-0);
+        border-color: var(--border-strong);
+    }
+}
+
+.condition-btn {
+    width: 30px;
+}
+
+.condition-add {
+    padding: 0 10px;
 }
 
 @media (max-width: 1200px) {
