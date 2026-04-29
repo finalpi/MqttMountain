@@ -6,6 +6,7 @@ import { useToast } from '@/composables/useToast';
 import { useUiPrefs } from '@/composables/useUiPrefs';
 import { usePluginStore } from '@/stores/plugins';
 import { useParamMemory } from '@/composables/useParamMemory';
+import { useFormatViewer } from '@/composables/useFormatViewer';
 import { shortTime } from '@/utils/format';
 import type { SenderDefinition, SenderParamAction } from '@shared/plugin';
 
@@ -15,6 +16,7 @@ const toast = useToast();
 const { prefs, toggleRight } = useUiPrefs();
 const plugins = usePluginStore();
 const paramMem = useParamMemory();
+const formatViewer = useFormatViewer();
 const isOpen = computed(() => prefs.activeRight === 'pub');
 
 const topic = ref('test/message');
@@ -105,20 +107,57 @@ function tryFormat(): void {
     }
 }
 
-async function doPublish(): Promise<void> {
+function openPayloadViewer(): void {
+    formatViewer.open({
+        topic: topic.value.trim() || '待发送消息',
+        time: Date.now(),
+        raw: payload.value,
+        autoFormat: true,
+        editable: true,
+        publishable: true,
+        history: historyList.value.slice(0, 30),
+        onApply: applyPayloadDraft,
+        onPublish: publishPayloadDraft
+    });
+}
+
+interface PayloadDraft {
+    topic: string;
+    raw: string;
+    qos?: number;
+    retain?: boolean;
+}
+
+function applyPayloadDraft(draft: PayloadDraft): void {
+    topic.value = draft.topic;
+    payload.value = draft.raw;
+    if (draft.qos === 0 || draft.qos === 1 || draft.qos === 2) qos.value = draft.qos;
+    if (typeof draft.retain === 'boolean') retain.value = draft.retain;
+}
+
+async function publishPayloadDraft(draft: PayloadDraft): Promise<void> {
+    applyPayloadDraft(draft);
+    await publishMessage(draft);
+}
+
+async function publishMessage(draft?: PayloadDraft): Promise<void> {
     const c = conn.selected;
     if (!c) return;
     if (!canOp.value) { toast.error('请先连接'); return; }
-    if (!topic.value.trim()) { toast.error('主题不能为空'); return; }
+    const nextTopic = (draft?.topic ?? topic.value).trim();
+    const nextPayload = draft?.raw ?? payload.value;
+    if (!nextTopic) { toast.error('主题不能为空'); return; }
     const r = await window.api.mqttPublish({
         connectionId: c.id,
-        topic: topic.value.trim(),
-        payload: payload.value,
+        topic: nextTopic,
+        payload: nextPayload,
         qos: qos.value,
         retain: retain.value
     });
     if (r.success) {
-        const item = { topic: topic.value.trim(), payload: payload.value, qos: qos.value, retain: retain.value, time: Date.now() };
+        topic.value = nextTopic;
+        payload.value = nextPayload;
+        const item = { topic: nextTopic, payload: nextPayload, qos: qos.value, retain: retain.value, time: Date.now() };
         msg.pushPublishHistory(c.id, item);
         await window.api.publishHistoryAppend({ connectionId: c.id, ...item });
         // 发送成功后把当前 sender 的参数值记入历史，下次可下拉选择
@@ -131,6 +170,10 @@ async function doPublish(): Promise<void> {
     } else {
         toast.error('发送失败：' + (r.message || ''));
     }
+}
+
+async function doPublish(): Promise<void> {
+    await publishMessage();
 }
 
 function repeat(item: { topic: string; payload: string; qos: number; retain: boolean }): void {
@@ -154,6 +197,8 @@ const senderGroups = computed(() => {
 const paramValues = ref<Record<string, string>>({});
 const paramSuggestionCache = ref<Record<string, string[]>>({});
 const activeSender = ref<(SenderDefinition & { pluginId: string; pluginName: string }) | null>(null);
+const lastTemplateTopic = ref('');
+const lastTemplatePayload = ref('');
 
 function suggestionListFor(paramKey: string): string[] {
     const values = new Set<string>();
@@ -172,9 +217,26 @@ function applyTemplate(tpl: string, vals: Record<string, string>): string {
     return tpl.replace(/\{(\w+)\}/g, (_, k) => vals[k] ?? `{${k}}`);
 }
 
+function syncTemplateOutput(s: SenderDefinition, overwrite = true): void {
+    const nextTopic = applyTemplate(s.topic, paramValues.value);
+    const nextPayload = applyTemplate(s.payloadTemplate, paramValues.value);
+    const canUpdateTopic = overwrite || topic.value === lastTemplateTopic.value;
+    const canUpdatePayload = overwrite || payload.value === lastTemplatePayload.value;
+
+    if (canUpdateTopic) topic.value = nextTopic;
+    if (canUpdatePayload) payload.value = nextPayload;
+    lastTemplateTopic.value = nextTopic;
+    lastTemplatePayload.value = nextPayload;
+}
+
 function pickSender(id: string): void {
     const s = plugins.allSenders.find((x) => x.id === id);
-    if (!s) { activeSender.value = null; return; }
+    if (!s) {
+        activeSender.value = null;
+        lastTemplateTopic.value = '';
+        lastTemplatePayload.value = '';
+        return;
+    }
     activeSender.value = s;
     paramValues.value = {};
     paramSuggestionCache.value = {};
@@ -186,8 +248,7 @@ function pickSender(id: string): void {
         const initial = memo != null && memo !== '' ? memo : String(pr.default ?? '');
         paramValues.value[pr.key] = initial;
     }
-    topic.value = applyTemplate(s.topic, paramValues.value);
-    payload.value = applyTemplate(s.payloadTemplate, paramValues.value);
+    syncTemplateOutput(s);
     if (s.qos != null) qos.value = s.qos;
     if (s.retain != null) retain.value = s.retain;
 }
@@ -195,8 +256,7 @@ function pickSender(id: string): void {
 function onParamInput(): void {
     const s = activeSender.value;
     if (!s) return;
-    topic.value = applyTemplate(s.topic, paramValues.value);
-    payload.value = applyTemplate(s.payloadTemplate, paramValues.value);
+    syncTemplateOutput(s);
 }
 
 function onSuggestionPick(paramKey: string, value: string): void {
@@ -249,7 +309,7 @@ watch(
                 changed = true;
             }
         }
-        if (changed) onParamInput();
+        if (changed) syncTemplateOutput(s, false);
     },
     { deep: true }
 );
@@ -344,14 +404,20 @@ const historyList = computed(() => {
             <div class="field">
                 <label class="payload-label">
                     <span>消息内容</span>
-                    <button class="btn btn-mini btn-ghost" @click="tryFormat">🪄 格式化</button>
+                    <span class="payload-actions">
+                        <span class="msg-hint">右键放大/格式化</span>
+                        <button class="btn btn-mini btn-ghost" @click="openPayloadViewer">放大</button>
+                        <button class="btn btn-mini btn-ghost" @click="tryFormat">🪄 格式化</button>
+                    </span>
                 </label>
                 <textarea
                     ref="payloadEl"
                     v-model="payload"
-                    rows="5"
+                    rows="10"
                     spellcheck="false"
+                    title="右键放大/格式化"
                     :class="['payload-input', `is-${jsonStatus.level}`]"
+                    @contextmenu.prevent="openPayloadViewer"
                 ></textarea>
                 <div class="payload-status" :class="`is-${jsonStatus.level}`">
                     <template v-if="jsonStatus.level === 'ok'">
@@ -371,7 +437,7 @@ const historyList = computed(() => {
                     </template>
                 </div>
             </div>
-            <button class="btn btn-primary" :disabled="!canOp" @click="doPublish">发布</button>
+            <button class="btn btn-primary" @click="doPublish">发布</button>
 
             <div class="history">
                 <label>发送历史</label>
@@ -441,7 +507,22 @@ const historyList = computed(() => {
     gap: 8px;
 }
 
+.payload-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    flex: 0 0 auto;
+}
+
+.msg-hint {
+    color: var(--text-3);
+    font-size: 10px;
+    font-weight: 500;
+}
+
 .payload-input {
+    min-height: 240px;
+    resize: vertical;
     transition: border-color 0.15s, box-shadow 0.15s;
 
     &.is-err {

@@ -5,28 +5,47 @@ import { useFormatViewer } from '@/composables/useFormatViewer';
 import { useToast } from '@/composables/useToast';
 import { formatTime } from '@/utils/format';
 import { escapeHtml } from '@/utils/filter';
-import type { DecodedResult } from '@shared/plugin';
+import type { DecodedResult, PluginReplyBlock } from '@shared/plugin';
 
-const { state, close } = useFormatViewer();
+const { state, close, applyDraft, publishDraft, repeatHistory } = useFormatViewer();
 const toast = useToast();
 
 const decoded = ref<DecodedResult | null>(null);
 const decoding = ref(false);
 const decodedCollapsed = ref(false);
+let decodeTimer: ReturnType<typeof setTimeout> | null = null;
+let decodeSeq = 0;
 
 watch(
-    () => [state.visible, state.raw, state.topic] as const,
-    async ([vis, raw, topic]) => {
-        decoded.value = null;
-        decodedCollapsed.value = false;
-        if (!vis || !raw) return;
-        decoding.value = true;
-        try {
-            const r = await window.api.pluginDecode({ topic, payload: raw });
-            if (r.success && r.data) decoded.value = r.data;
-        } finally {
-            decoding.value = false;
+    () => [state.visible, state.editable ? state.draftRaw : state.raw, state.editable ? state.draftTopic : state.topic] as const,
+    ([vis, raw, topic]) => {
+        if (decodeTimer) {
+            clearTimeout(decodeTimer);
+            decodeTimer = null;
         }
+        const seq = ++decodeSeq;
+        if (!vis) {
+            decoded.value = null;
+            decodedCollapsed.value = false;
+            decoding.value = false;
+            return;
+        }
+        if (!raw) {
+            decoded.value = null;
+            decodedCollapsed.value = false;
+            return;
+        }
+        decoding.value = true;
+        decodeTimer = setTimeout(async () => {
+            try {
+                const r = await window.api.pluginDecode({ topic, payload: raw });
+                if (seq !== decodeSeq) return;
+                decoded.value = r.success && r.data ? r.data : null;
+                decodedCollapsed.value = false;
+            } finally {
+                if (seq === decodeSeq) decoding.value = false;
+            }
+        }, state.editable ? 220 : 0);
     }
 );
 
@@ -38,6 +57,9 @@ const jsonCollapsedPaths = ref<Set<string>>(new Set());
 
 const bodyEl = ref<HTMLElement | null>(null);
 
+const displayRaw = computed(() => state.editable ? state.draftRaw : state.raw);
+const displayTopic = computed(() => state.editable ? state.draftTopic : state.topic);
+
 interface DecodedFieldValue {
     path: string;
     key: string;
@@ -47,7 +69,7 @@ interface DecodedFieldValue {
 
 /** 尝试 JSON 解析，失败则按原样显示 */
 const formatted = computed<{ text: string; isJson: boolean; value: unknown }>(() => {
-    const s = state.raw;
+    const s = displayRaw.value;
     if (!s) return { text: '', isJson: false, value: null };
     try {
         const v = JSON.parse(s);
@@ -119,6 +141,11 @@ const decodedDisplayItems = computed(() => {
     decoded.value?.highlights?.forEach((item) => push(item.label, item.value));
     decodedFieldValues.value.forEach((item) => push(item.label, item.value || ''));
     return out;
+});
+
+const replyBlocks = computed<PluginReplyBlock[]>(() => {
+    const blocks = decoded.value?.replyBlocks;
+    return Array.isArray(blocks) ? blocks : [];
 });
 
 /** 在已渲染 HTML 上套搜索高亮（遍历文本节点） */
@@ -211,6 +238,22 @@ async function copyAll(): Promise<void> {
     }
 }
 
+function formatDraft(): void {
+    if (!state.editable || !state.draftRaw.trim()) return;
+    try {
+        state.draftRaw = JSON.stringify(JSON.parse(state.draftRaw), null, 2);
+        refreshSearchHighlights();
+    } catch {
+        toast.error('不是合法 JSON，无法格式化');
+    }
+}
+
+function applyAndClose(): void {
+    applyDraft();
+    toast.success('已应用到发送框');
+    close();
+}
+
 function onKeydown(e: KeyboardEvent): void {
     if (!state.visible) return;
     if (e.key === 'Escape') { e.preventDefault(); close(); return; }
@@ -228,10 +271,13 @@ function onKeydown(e: KeyboardEvent): void {
 }
 
 window.addEventListener('keydown', onKeydown);
-onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown));
+onBeforeUnmount(() => {
+    window.removeEventListener('keydown', onKeydown);
+    if (decodeTimer) clearTimeout(decodeTimer);
+});
 
 watch(
-    () => [state.visible, state.raw, search.value, caseSensitive.value] as const,
+    () => [state.visible, displayRaw.value, search.value, caseSensitive.value] as const,
     async () => {
         if (!state.visible) return;
         await nextTick();
@@ -251,7 +297,7 @@ watch(
     }
 );
 
-const title = computed(() => state.topic || '消息内容');
+const title = computed(() => displayTopic.value || '消息内容');
 </script>
 
 <template>
@@ -264,6 +310,7 @@ const title = computed(() => state.topic || '消息内容');
                             <div class="fv-topic" :title="title">{{ title }}</div>
                             <div class="fv-meta">
                                 <span v-if="state.time">{{ formatTime(state.time) }}</span>
+                                <span v-if="state.editable" class="tag edit">可编辑</span>
                                 <span v-if="formatted.isJson" class="tag">JSON</span>
                                 <span v-else class="tag raw">RAW</span>
                                 <span class="tag dim">{{ formatted.text.length }} 字符</span>
@@ -285,8 +332,11 @@ const title = computed(() => state.topic || '消息内容');
                         </div>
 
                         <div class="fv-actions">
+                            <button v-if="state.editable" class="btn btn-mini" @click="formatDraft" title="格式化编辑内容">格式化</button>
                             <button v-if="formatted.isJson" class="btn btn-mini" @click="collapseJson" title="折叠 JSON 对象和数组">全部折叠</button>
                             <button v-if="formatted.isJson" class="btn btn-mini" @click="expandJson" title="展开 JSON 对象和数组">全部展开</button>
+                            <button v-if="state.editable" class="btn btn-mini" @click="applyAndClose" title="应用到发送框">应用</button>
+                            <button v-if="state.editable && state.publishable" class="btn btn-mini btn-primary" @click="publishDraft" title="发送当前编辑内容">发送</button>
                             <button class="btn btn-mini" @click="copyAll" title="复制全部">复制</button>
                             <button class="btn btn-mini btn-danger" @click="close" title="关闭 (Esc)">×</button>
                         </div>
@@ -299,7 +349,7 @@ const title = computed(() => state.topic || '消息内容');
                                 {{ decodedCollapsed ? '展开' : '收起' }}
                             </button>
                         </div>
-                        <div v-if="!decodedCollapsed && decodedDisplayItems.length" class="highlights">
+                        <div v-if="!decodedCollapsed && decodedDisplayItems.length && replyBlocks.length === 0" class="highlights">
                             <div v-for="(h, i) in decodedDisplayItems" :key="i" class="hl-item">
                                 <span class="k">{{ h.label }}</span>
                                 <span class="v">{{ h.value }}</span>
@@ -307,13 +357,75 @@ const title = computed(() => state.topic || '消息内容');
                         </div>
                     </div>
 
+                    <div v-if="state.editable" class="fv-edit-shell">
+                        <div class="fv-edit-main">
+                            <label class="fv-edit-topic">
+                                <span>目标主题</span>
+                                <input v-model="state.draftTopic" placeholder="test/topic" />
+                            </label>
+                            <label class="fv-edit-content">
+                                <span>消息内容</span>
+                                <textarea v-model="state.draftRaw" spellcheck="false"></textarea>
+                            </label>
+                            <div class="fv-body fv-preview" ref="bodyEl" :class="{ 'is-json': formatted.isJson, 'has-reply-blocks': replyBlocks.length > 0 }">
+                                <div v-if="replyBlocks.length" class="reply-block-list">
+                                    <section v-for="(block, idx) in replyBlocks" :key="idx" class="reply-block" :class="block.status || 'info'">
+                                        <div class="reply-title">{{ block.title }}</div>
+                                        <div v-if="block.summary" class="reply-summary">{{ block.summary }}</div>
+                                        <div v-if="block.fields?.length" class="reply-fields">
+                                            <div v-for="(field, fieldIdx) in block.fields" :key="fieldIdx" class="reply-field">
+                                                <span class="label">{{ field.label }}</span>
+                                                <span class="value">{{ field.value }}</span>
+                                            </div>
+                                        </div>
+                                    </section>
+                                </div>
+                                <JsonTreeView
+                                    v-else-if="formatted.isJson"
+                                    :value="formatted.value"
+                                    :collapsed-paths="jsonCollapsedPaths"
+                                    @toggle="toggleJsonPath"
+                                />
+                                <pre v-else class="fv-raw" v-html="escapeHtml(formatted.text)"></pre>
+                            </div>
+                        </div>
+                        <aside class="fv-history">
+                            <div class="history-title">发送历史</div>
+                            <div v-if="state.history.length === 0" class="history-empty">暂无发送记录</div>
+                            <button
+                                v-for="(h, idx) in state.history"
+                                :key="idx"
+                                type="button"
+                                class="history-item"
+                                @click="repeatHistory(h)"
+                            >
+                                <span class="time">{{ formatTime(h.time) }}</span>
+                                <span class="pill">QoS {{ h.qos }}</span>
+                                <span class="topic">{{ h.topic }}</span>
+                                <span class="payload">{{ h.payload }}</span>
+                            </button>
+                        </aside>
+                    </div>
                     <div
+                        v-else
                         class="fv-body"
                         ref="bodyEl"
-                        :class="{ 'is-json': formatted.isJson }"
+                        :class="{ 'is-json': formatted.isJson, 'has-reply-blocks': replyBlocks.length > 0 }"
                     >
+                        <div v-if="replyBlocks.length" class="reply-block-list">
+                            <section v-for="(block, idx) in replyBlocks" :key="idx" class="reply-block" :class="block.status || 'info'">
+                                <div class="reply-title">{{ block.title }}</div>
+                                <div v-if="block.summary" class="reply-summary">{{ block.summary }}</div>
+                                <div v-if="block.fields?.length" class="reply-fields">
+                                    <div v-for="(field, fieldIdx) in block.fields" :key="fieldIdx" class="reply-field">
+                                        <span class="label">{{ field.label }}</span>
+                                        <span class="value">{{ field.value }}</span>
+                                    </div>
+                                </div>
+                            </section>
+                        </div>
                         <JsonTreeView
-                            v-if="formatted.isJson"
+                            v-else-if="formatted.isJson"
                             :value="formatted.value"
                             :collapsed-paths="jsonCollapsedPaths"
                             @toggle="toggleJsonPath"
@@ -400,6 +512,10 @@ const title = computed(() => state.topic || '消息内容');
                 color: var(--text-3);
                 font-weight: 400;
             }
+            &.edit {
+                background: rgba(16, 185, 129, 0.18);
+                color: #86efac;
+            }
         }
     }
 }
@@ -446,6 +562,161 @@ const title = computed(() => state.topic || '消息内容');
     gap: 6px;
     flex-wrap: wrap;
     justify-content: flex-end;
+}
+
+.fv-edit-shell {
+    flex: 1;
+    min-height: 0;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(260px, 320px);
+    background: var(--bg-0);
+}
+
+.fv-edit-main {
+    min-width: 0;
+    min-height: 0;
+    display: grid;
+    grid-template-rows: auto minmax(240px, 1fr) minmax(180px, 0.75fr);
+    border-right: 1px solid var(--border);
+}
+
+.fv-edit-topic,
+.fv-edit-content {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+
+    > span {
+        color: var(--text-2);
+        font-size: 11px;
+        font-weight: 700;
+    }
+}
+
+.fv-edit-topic input,
+.fv-edit-content textarea {
+    width: 100%;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--input-bg);
+    color: var(--text-0);
+    outline: none;
+    font-family: 'JetBrains Mono', Consolas, Menlo, monospace;
+    font-size: var(--fs-msg);
+
+    &:focus {
+        border-color: var(--accent);
+        box-shadow: 0 0 0 3px rgba(124, 92, 255, 0.16);
+    }
+}
+
+.fv-edit-topic input {
+    padding: 9px 10px;
+}
+
+.fv-edit-content {
+    min-height: 0;
+
+    textarea {
+        flex: 1;
+        min-height: 0;
+        resize: none;
+        padding: 12px;
+        line-height: 1.55;
+        white-space: pre;
+    }
+}
+
+.fv-preview {
+    border-top: 1px solid var(--border);
+}
+
+.fv-history {
+    min-width: 0;
+    min-height: 0;
+    overflow: auto;
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.history-title {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    padding: 0 0 4px;
+    background: var(--bg-0);
+    color: var(--text-2);
+    font-size: 12px;
+    font-weight: 700;
+}
+
+.history-empty {
+    color: var(--text-3);
+    font-size: 12px;
+    padding: 12px;
+    text-align: center;
+}
+
+.history-item {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 8px;
+    width: 100%;
+    padding: 10px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--card-bg);
+    color: var(--text-1);
+    text-align: left;
+    cursor: pointer;
+
+    &:hover {
+        background: var(--card-hover-bg);
+        border-color: var(--border-strong);
+    }
+
+    .time {
+        color: var(--text-3);
+        font-family: 'JetBrains Mono', Consolas, monospace;
+        font-size: 10px;
+    }
+
+    .pill {
+        padding: 1px 7px;
+        border-radius: 999px;
+        border: 1px solid var(--border);
+        color: var(--text-2);
+        font-size: 10px;
+        font-weight: 700;
+    }
+
+    .topic,
+    .payload {
+        flex: 1 1 100%;
+        overflow: hidden;
+        display: -webkit-box;
+        -webkit-box-orient: vertical;
+        font-family: 'JetBrains Mono', Consolas, monospace;
+        line-height: 1.45;
+        word-break: break-all;
+    }
+
+    .topic {
+        -webkit-line-clamp: 2;
+        color: var(--accent-2);
+        font-size: 11px;
+    }
+
+    .payload {
+        -webkit-line-clamp: 4;
+        color: var(--text-2);
+        font-size: 11px;
+        white-space: pre-wrap;
+    }
 }
 
 .fv-decoded {
@@ -576,6 +847,82 @@ const title = computed(() => state.topic || '消息内容');
 
     &.is-json {
         color: var(--text-1);
+    }
+
+    &.has-reply-blocks {
+        white-space: normal;
+        word-break: normal;
+    }
+}
+
+.reply-block-list {
+    display: grid;
+    gap: 12px;
+}
+
+.reply-block {
+    border: 1px solid rgba(125, 211, 252, 0.28);
+    border-radius: 12px;
+    padding: 14px;
+    background: rgba(15, 23, 42, 0.42);
+
+    &.success {
+        border-color: rgba(16, 185, 129, 0.38);
+        background: rgba(16, 185, 129, 0.1);
+    }
+
+    &.warning {
+        border-color: rgba(251, 191, 36, 0.42);
+        background: rgba(251, 191, 36, 0.1);
+    }
+
+    &.error {
+        border-color: rgba(239, 68, 68, 0.42);
+        background: rgba(239, 68, 68, 0.1);
+    }
+}
+
+.reply-title {
+    color: var(--text-0);
+    font-size: 14px;
+    font-weight: 800;
+}
+
+.reply-summary {
+    margin-top: 6px;
+    color: var(--text-2);
+    font-size: 12px;
+    line-height: 1.5;
+}
+
+.reply-fields {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 8px;
+    margin-top: 12px;
+}
+
+.reply-field {
+    min-width: 0;
+    padding: 8px 10px;
+    border: 1px solid rgba(148, 163, 184, 0.18);
+    border-radius: 8px;
+    background: rgba(2, 6, 23, 0.24);
+
+    .label {
+        display: block;
+        color: var(--text-3);
+        font-size: 11px;
+        margin-bottom: 3px;
+    }
+
+    .value {
+        display: block;
+        color: var(--accent-2);
+        font-family: 'JetBrains Mono', Consolas, monospace;
+        font-size: 12px;
+        font-weight: 700;
+        overflow-wrap: anywhere;
     }
 }
 

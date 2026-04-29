@@ -95,6 +95,8 @@ export interface DecodedResult {
     summary?: string;
     /** 关键字段高亮列表 */
     highlights?: { label: string; value: string }[];
+    /** 插件自定义的 reply 展示块；存在时格式化弹窗优先展示它，而不是默认 JSON 树 */
+    replyBlocks?: PluginReplyBlock[];
     /** 解析后的结构化数据（宿主可能以 JSON 树形式展示） */
     tree?: unknown;
     /** 中文主题别名；宿主在主题列表中显示在原 topic 旁 */
@@ -112,6 +114,13 @@ export interface DecodedResult {
      */
     meta?: PluginDecodedMeta;
     /** 自定义内容：可选字段，将用于未来扩展 */
+}
+
+export interface PluginReplyBlock {
+    title: string;
+    status?: 'success' | 'warning' | 'error' | 'info';
+    summary?: string;
+    fields?: { label: string; value: string }[];
 }
 
 export interface PluginDecodedMeta {

@@ -152,9 +152,13 @@ async function onImportFile(e: Event): Promise<void> {
         const text = await f.text();
         const data = JSON.parse(text);
         const arr = Array.isArray(data) ? data : (data.connections ?? []);
+        const existingIds = new Set(conn.list.map((item) => item.id));
         for (const raw of arr) {
+            let id = String(raw.id ?? '');
+            if (!id || existingIds.has(id)) id = (Date.now() + Math.random()).toString(36);
+            existingIds.add(id);
             conn.list.push({
-                id: raw.id ?? (Date.now() + Math.random()).toString(36),
+                id,
                 name: raw.name ?? '导入连接',
                 protocol: raw.protocol ?? 'mqtt://',
                 host: raw.host ?? '',
@@ -162,7 +166,7 @@ async function onImportFile(e: Event): Promise<void> {
                 path: raw.path ?? '/mqtt',
                 username: raw.username ?? '',
                 password: raw.password ?? '',
-                clientId: raw.clientId ?? randomClientId(),
+                clientId: randomClientId(),
                 subscriptions: raw.subscriptions ?? [],
                 disabledTopics: raw.disabledTopics ?? [],
                 createdAt: raw.createdAt ?? Date.now(),
