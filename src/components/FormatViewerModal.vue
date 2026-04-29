@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
+import JsonTreeView from '@/components/JsonTreeView.vue';
 import { useFormatViewer } from '@/composables/useFormatViewer';
 import { useToast } from '@/composables/useToast';
 import { formatTime } from '@/utils/format';
@@ -33,6 +34,7 @@ const search = ref('');
 const caseSensitive = ref(false);
 const currentIndex = ref(0);
 const matchCount = ref(0);
+const jsonCollapsedPaths = ref<Set<string>>(new Set());
 
 const bodyEl = ref<HTMLElement | null>(null);
 
@@ -43,24 +45,57 @@ interface DecodedFieldValue {
     value?: string;
 }
 
-interface TimestampHit {
-    raw: string;
-    unit: 's' | 'ms';
-    local: string;
-    iso: string;
-}
-
 /** 尝试 JSON 解析，失败则按原样显示 */
-const formatted = computed<{ text: string; isJson: boolean }>(() => {
+const formatted = computed<{ text: string; isJson: boolean; value: unknown }>(() => {
     const s = state.raw;
-    if (!s) return { text: '', isJson: false };
+    if (!s) return { text: '', isJson: false, value: null };
     try {
         const v = JSON.parse(s);
-        return { text: JSON.stringify(v, null, 2), isJson: true };
+        return { text: JSON.stringify(v, null, 2), isJson: true, value: v };
     } catch {
-        return { text: s, isJson: false };
+        return { text: s, isJson: false, value: null };
     }
 });
+
+function collectJsonBranchPaths(value: unknown, path = '$'): string[] {
+    if (Array.isArray(value)) {
+        return [path, ...value.flatMap((child, index) => collectJsonBranchPaths(child, `${path}[${index}]`))];
+    }
+    if (value && typeof value === 'object') {
+        return [
+            path,
+            ...Object.entries(value as Record<string, unknown>).flatMap(([key, child]) =>
+                collectJsonBranchPaths(child, `${path}.${encodeURIComponent(key)}`)
+            )
+        ];
+    }
+    return [];
+}
+
+function refreshSearchHighlights(): void {
+    nextTick().then(applySearchHighlights);
+}
+
+function toggleJsonPath(path: string): void {
+    clearHighlights();
+    const next = new Set(jsonCollapsedPaths.value);
+    if (next.has(path)) next.delete(path);
+    else next.add(path);
+    jsonCollapsedPaths.value = next;
+    refreshSearchHighlights();
+}
+
+function collapseJson(): void {
+    clearHighlights();
+    jsonCollapsedPaths.value = new Set(collectJsonBranchPaths(formatted.value.value).filter((path) => path !== '$'));
+    refreshSearchHighlights();
+}
+
+function expandJson(): void {
+    clearHighlights();
+    jsonCollapsedPaths.value = new Set();
+    refreshSearchHighlights();
+}
 
 const decodedFieldValues = computed<DecodedFieldValue[]>(() => {
     const detail = decoded.value as (DecodedResult & {
@@ -85,62 +120,6 @@ const decodedDisplayItems = computed(() => {
     decodedFieldValues.value.forEach((item) => push(item.label, item.value || ''));
     return out;
 });
-
-/** 简易 JSON 语法高亮（string/number/bool/null/key） */
-function timestampToMs(value: string | number): { ms: number; unit: 's' | 'ms' } | null {
-    const text = String(value).trim();
-    if (!/^-?\d+$/.test(text)) return null;
-    const abs = text.startsWith('-') ? text.slice(1) : text;
-    const n = Number(text);
-    if (!Number.isSafeInteger(n)) return null;
-    if (abs.length === 10) return { ms: n * 1000, unit: 's' };
-    if (abs.length === 13) return { ms: n, unit: 'ms' };
-    return null;
-}
-
-function isReasonableTimestamp(ms: number): boolean {
-    return ms >= Date.UTC(2000, 0, 1) && ms <= Date.UTC(2100, 0, 1);
-}
-
-function makeTimestampHit(raw: string | number): TimestampHit | null {
-    const converted = timestampToMs(raw);
-    if (!converted || !isReasonableTimestamp(converted.ms)) return null;
-    return {
-        raw: String(raw),
-        unit: converted.unit,
-        local: formatTime(converted.ms),
-        iso: new Date(converted.ms).toISOString()
-    };
-}
-
-function colorizeJson(src: string): string {
-    return src.replace(
-        /("(\\u[a-fA-F0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d+)?(?:[eE][+\-]?\d+)?)/g,
-        (match) => {
-            const escaped = escapeHtml(match);
-            if (/^"/.test(match)) {
-                if (/:$/.test(match)) return `<span class="k-key">${escaped}</span>`;
-                return `<span class="k-str">${escaped}</span>`;
-            }
-            if (/true|false/.test(match)) return `<span class="k-bool">${escaped}</span>`;
-            if (/null/.test(match)) return `<span class="k-null">${escaped}</span>`;
-            const timestamp = makeTimestampHit(match);
-            if (timestamp) {
-                return [
-                    '<span class="k-num k-time" tabindex="0">',
-                    escaped,
-                    '<span class="time-pop">',
-                    `<span>${escapeHtml(timestamp.local)}</span>`,
-                    `<span>${escapeHtml(timestamp.iso)}</span>`,
-                    `<span>${timestamp.unit === 'ms' ? 'millisecond timestamp' : 'second timestamp'}</span>`,
-                    '</span>',
-                    '</span>'
-                ].join('');
-            }
-            return `<span class="k-num">${escaped}</span>`;
-        }
-    );
-}
 
 /** 在已渲染 HTML 上套搜索高亮（遍历文本节点） */
 function applySearchHighlights(): void {
@@ -267,6 +246,7 @@ watch(
             search.value = '';
             matchCount.value = 0;
             currentIndex.value = 0;
+            jsonCollapsedPaths.value = new Set();
         }
     }
 );
@@ -305,6 +285,8 @@ const title = computed(() => state.topic || '消息内容');
                         </div>
 
                         <div class="fv-actions">
+                            <button v-if="formatted.isJson" class="btn btn-mini" @click="collapseJson" title="折叠 JSON 对象和数组">全部折叠</button>
+                            <button v-if="formatted.isJson" class="btn btn-mini" @click="expandJson" title="展开 JSON 对象和数组">全部展开</button>
                             <button class="btn btn-mini" @click="copyAll" title="复制全部">复制</button>
                             <button class="btn btn-mini btn-danger" @click="close" title="关闭 (Esc)">×</button>
                         </div>
@@ -325,12 +307,19 @@ const title = computed(() => state.topic || '消息内容');
                         </div>
                     </div>
 
-                    <pre
+                    <div
                         class="fv-body"
                         ref="bodyEl"
                         :class="{ 'is-json': formatted.isJson }"
-                        v-html="formatted.isJson ? colorizeJson(formatted.text) : escapeHtml(formatted.text)"
-                    ></pre>
+                    >
+                        <JsonTreeView
+                            v-if="formatted.isJson"
+                            :value="formatted.value"
+                            :collapsed-paths="jsonCollapsedPaths"
+                            @toggle="toggleJsonPath"
+                        />
+                        <pre v-else class="fv-raw" v-html="escapeHtml(formatted.text)"></pre>
+                    </div>
                 </div>
             </div>
         </Transition>
@@ -455,6 +444,8 @@ const title = computed(() => state.topic || '消息内容');
 .fv-actions {
     display: flex;
     gap: 6px;
+    flex-wrap: wrap;
+    justify-content: flex-end;
 }
 
 .fv-decoded {
@@ -588,6 +579,87 @@ const title = computed(() => state.topic || '消息内容');
     }
 }
 
+.fv-raw {
+    margin: 0;
+    font: inherit;
+    color: inherit;
+    white-space: inherit;
+    word-break: inherit;
+}
+
+:deep(.json-line) {
+    min-height: 1.55em;
+}
+
+:deep(.json-toggle),
+:deep(.json-toggle-spacer) {
+    display: inline-grid;
+    place-items: center;
+    width: 18px;
+    height: 18px;
+    margin-right: 2px;
+    vertical-align: text-bottom;
+}
+
+:deep(.json-toggle) {
+    border: none;
+    background: transparent;
+    color: var(--accent-2);
+    cursor: pointer;
+    font-size: 10px;
+    padding: 0;
+    border-radius: 4px;
+
+    &:hover {
+        background: rgba(124, 92, 255, 0.22);
+    }
+}
+
+:deep(.json-key) {
+    color: #8be9fd;
+}
+
+:deep(.json-string) {
+    color: #a3e635;
+}
+
+:deep(.json-number) {
+    color: #fbbf24;
+}
+
+:deep(.json-time) {
+    position: relative;
+    display: inline-block;
+    border-bottom: 1px dotted rgba(251, 191, 36, 0.75);
+    cursor: help;
+}
+
+:deep(.json-boolean) {
+    color: #f472b6;
+}
+
+:deep(.json-null) {
+    color: #94a3b8;
+    font-style: italic;
+}
+
+:deep(.json-bracket),
+:deep(.json-colon),
+:deep(.json-comma) {
+    color: var(--text-2);
+}
+
+:deep(.json-summary) {
+    margin: 0 6px;
+    color: var(--text-3);
+    font-style: italic;
+}
+
+:deep(.json-time:hover .time-pop),
+:deep(.json-time:focus .time-pop) {
+    display: block;
+}
+
 :deep(.k-key) {
     color: #8be9fd;
 }
@@ -603,7 +675,8 @@ const title = computed(() => state.topic || '消息内容');
     border-bottom: 1px dotted rgba(251, 191, 36, 0.75);
     cursor: help;
 }
-:deep(.k-time .time-pop) {
+:deep(.k-time .time-pop),
+:deep(.json-time .time-pop) {
     position: absolute;
     left: 50%;
     bottom: calc(100% + 8px);
@@ -624,7 +697,8 @@ const title = computed(() => state.topic || '消息内容');
     white-space: normal;
     word-break: normal;
 }
-:deep(.k-time .time-pop::after) {
+:deep(.k-time .time-pop::after),
+:deep(.json-time .time-pop::after) {
     content: '';
     position: absolute;
     left: 50%;
@@ -636,14 +710,17 @@ const title = computed(() => state.topic || '消息内容');
     border-bottom: 1px solid rgba(125, 211, 252, 0.35);
     background: rgba(8, 13, 30, 0.98);
 }
-:deep(.k-time .time-pop span) {
+:deep(.k-time .time-pop span),
+:deep(.json-time .time-pop span) {
     display: block;
 }
-:deep(.k-time .time-pop span:first-child) {
+:deep(.k-time .time-pop span:first-child),
+:deep(.json-time .time-pop span:first-child) {
     color: #fef3c7;
     font-weight: 700;
 }
-:deep(.k-time .time-pop span:last-child) {
+:deep(.k-time .time-pop span:last-child),
+:deep(.json-time .time-pop span:last-child) {
     margin-top: 2px;
     color: #94a3b8;
 }
