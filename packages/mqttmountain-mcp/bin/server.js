@@ -9,7 +9,11 @@ import { z } from 'zod';
 
 const DATE_KEY_FILE_RE = /^\d{4}-\d{2}-\d{2}\.db$/;
 const MAX_LIMIT = 5000;
-const PACKAGE_VERSION = '0.1.0';
+const DEFAULT_STATUS_MINUTES = 10;
+const DEFAULT_STATUS_TOPIC_LIMIT = 10;
+const DEFAULT_PAYLOAD_SAMPLE_LIMIT = 5;
+const DEFAULT_PAYLOAD_PREVIEW_CHARS = 300;
+const PACKAGE_VERSION = '0.1.2';
 
 function printHelp() {
   process.stdout.write(`mqttmountain-mcp ${PACKAGE_VERSION}
@@ -43,12 +47,36 @@ function parseArgs(argv) {
 
 function defaultUserDataDir() {
   if (process.platform === 'win32') {
-    return path.join(process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'), 'MQTTMountain');
+    const base = process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming');
+    return bestExistingDir([
+      path.join(base, 'mqttmountain'),
+      path.join(base, 'MQTTMountain'),
+      path.join(base, 'mqtt-mountain')
+    ]);
   }
   if (process.platform === 'darwin') {
-    return path.join(os.homedir(), 'Library', 'Application Support', 'MQTTMountain');
+    const base = path.join(os.homedir(), 'Library', 'Application Support');
+    return bestExistingDir([
+      path.join(base, 'mqttmountain'),
+      path.join(base, 'MQTTMountain'),
+      path.join(base, 'mqtt-mountain')
+    ]);
   }
-  return path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'MQTTMountain');
+  const base = process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config');
+  return bestExistingDir([
+    path.join(base, 'mqttmountain'),
+    path.join(base, 'MQTTMountain'),
+    path.join(base, 'mqtt-mountain')
+  ]);
+}
+
+function bestExistingDir(candidates) {
+  const scored = candidates.map((dir) => ({
+    dir,
+    score: (fs.existsSync(configDbPath(dir)) ? 2 : 0) + (fs.existsSync(path.join(dir, 'message_logs')) ? 1 : 0)
+  }));
+  scored.sort((a, b) => b.score - a.score);
+  return scored[0].score > 0 ? scored[0].dir : candidates[0];
 }
 
 function configDbPath(userDataDir) {
@@ -135,17 +163,23 @@ function listDayFiles(logDir, connectionId, descending = true) {
   return files.map((file) => path.join(dir, file));
 }
 
-function readConnections(userDataDir, logDir) {
+function readConnections(userDataDir, logDir, includeMatchFields = false) {
   let saved = [];
+  let selectedId = null;
   try {
     const config = readConfigValue(userDataDir, 'connections');
     if (config && Array.isArray(config.connections)) {
+      selectedId = typeof config.selectedId === 'string' ? config.selectedId : null;
       saved = config.connections.map((item) => ({
         id: String(item.id || ''),
         name: String(item.name || item.id || ''),
         host: String(item.host || ''),
         port: Number(item.port || 0),
-        protocol: String(item.protocol || '')
+        protocol: String(item.protocol || ''),
+        username: String(item.username || ''),
+        subscriptionTopics: Array.isArray(item.subscriptions)
+          ? item.subscriptions.map((sub) => String(sub.topic || '')).filter(Boolean)
+          : []
       })).filter((item) => item.id);
     }
   } catch {
@@ -156,22 +190,63 @@ function readConnections(userDataDir, logDir) {
   return {
     userDataDir,
     logDir,
-    connections: saved.map((item) => ({
-      ...item,
-      hasLogs: logIds.has(sanitizeConnectionId(item.id))
-    })),
+    selectedId,
+    connections: saved.map((item) => {
+      const connection = {
+        id: item.id,
+        name: item.name,
+        host: item.host,
+        port: item.port,
+        protocol: item.protocol,
+        hasLogs: logIds.has(sanitizeConnectionId(item.id))
+      };
+      return includeMatchFields
+        ? { ...connection, username: item.username, subscriptionTopics: item.subscriptionTopics }
+        : connection;
+    }),
     logOnlyConnectionIds: [...logIds].filter((id) => !saved.some((item) => sanitizeConnectionId(item.id) === id))
   };
 }
 
-function readRecentMessages(logDir, connectionId, limit) {
+function resolveConnectionId(userDataDir, logDir, input) {
+  if (input.connectionId && input.connectionId.trim()) return input.connectionId.trim();
+  const name = input.connectionName && input.connectionName.trim();
+  const keyword = input.connectionKeyword && input.connectionKeyword.trim();
+  const query = name || keyword;
+  if (!query) return null;
+
+  const config = readConnections(userDataDir, logDir, true);
+  const matches = config.connections.filter((item) => item.name === query || item.id === query);
+  if (matches.length === 1) return matches[0].id;
+  if (matches.length > 1) {
+    throw new Error(`Connection "${query}" matched multiple connections. Use connectionId instead.`);
+  }
+
+  const fuzzyMatches = config.connections.filter((item) => connectionMatches(item, query));
+  if (fuzzyMatches.length === 1) return fuzzyMatches[0].id;
+  if (fuzzyMatches.length > 1 && config.selectedId && fuzzyMatches.some((item) => item.id === config.selectedId)) {
+    return config.selectedId;
+  }
+  if (fuzzyMatches.length > 1) {
+    throw new Error(`Connection "${query}" matched multiple connections. Use connectionId instead.`);
+  }
+
+  const logOnlyMatch = config.logOnlyConnectionIds.find((id) => id === query || sanitizeConnectionId(id) === query);
+  if (logOnlyMatch) return logOnlyMatch;
+  throw new Error(`Connection not found: ${query}`);
+}
+
+function readRecentMessages(logDir, connectionId, limit, topic) {
   const max = Math.min(MAX_LIMIT, Math.max(1, limit));
+  const topicFilter = topic && topic.trim() ? topic.trim() : null;
   const out = [];
   for (const filePath of listDayFiles(logDir, connectionId, true)) {
     if (out.length >= max) break;
     const db = new Database(filePath, { readonly: true, fileMustExist: true });
     try {
-      const rows = db.prepare('SELECT bucket_ts, topic, blob FROM buckets ORDER BY bucket_ts DESC').all();
+      const rows = topicFilter
+        ? db.prepare('SELECT bucket_ts, topic, blob FROM buckets WHERE topic = ? ORDER BY bucket_ts DESC').all(topicFilter)
+        : db.prepare('SELECT bucket_ts, topic, blob FROM buckets ORDER BY bucket_ts DESC').all();
       for (const row of rows) {
         const decoded = decodeBucket(row.blob, row.bucket_ts, row.topic, connectionId);
         for (let i = decoded.length - 1; i >= 0; i--) {
@@ -189,6 +264,242 @@ function readRecentMessages(logDir, connectionId, limit) {
 
 function normalizeKeyword(value) {
   return String(value || '').replace(/\s+/gu, '').toLowerCase();
+}
+
+function connectionMatches(item, query) {
+  const terms = expandConnectionSearchTerms(query);
+  const hay = normalizeKeyword([
+    item.id,
+    item.name,
+    item.host,
+    item.username,
+    ...(item.subscriptionTopics || [])
+  ].join(' '));
+  return terms.some((term) => hay.includes(term));
+}
+
+function expandConnectionSearchTerms(value) {
+  const normalized = normalizeKeyword(value);
+  const terms = [normalized];
+  if (normalized.includes('深圳') && normalized.includes('星扬')) {
+    terms.push('xingyang-szga', 'xingyangszga', 'szga');
+  }
+  return [...new Set(terms.filter(Boolean))];
+}
+
+function formatLocalTime(ms) {
+  if (!Number.isFinite(ms)) return null;
+  const d = new Date(ms);
+  const pad = (n, width = 2) => String(n).padStart(width, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${pad(d.getMilliseconds(), 3)}`;
+}
+
+function previewPayload(payload, maxChars) {
+  if (!maxChars) return undefined;
+  const text = String(payload || '').replace(/\s+/gu, ' ').trim();
+  return text.length > maxChars ? `${text.slice(0, maxChars)}...` : text;
+}
+
+function summarizePayload(payload, previewChars, fieldPaths = []) {
+  const summary = {
+    bytes: Buffer.byteLength(String(payload || ''), 'utf8'),
+    type: 'text'
+  };
+  const payloadPreview = previewPayload(payload, previewChars);
+  if (payloadPreview) summary.preview = payloadPreview;
+
+  try {
+    const parsed = JSON.parse(payload);
+    summary.type = Array.isArray(parsed) ? 'json-array' : 'json-object';
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      summary.keys = Object.keys(parsed).slice(0, 20);
+      const fields = pickPayloadFields(parsed, fieldPaths);
+      if (Object.keys(fields).length) summary.fields = fields;
+    }
+  } catch {
+    // Non-JSON payloads are still useful with byte length and preview.
+  }
+  return summary;
+}
+
+function pickPayloadFields(parsed, fieldPaths) {
+  const defaultPaths = [
+    'sn', 'status', 'statusVal', 'online', 'longitude', 'latitude', 'height', 'altitude',
+    'gateway', 'timestamp', 'data.sn', 'data.mode_code', 'data.longitude', 'data.latitude',
+    'data.height', 'data.capacity_percent'
+  ];
+  const out = {};
+  for (const fieldPath of [...new Set([...defaultPaths, ...fieldPaths])]) {
+    const value = getPayloadPath(parsed, fieldPath);
+    if (value !== undefined && value !== null && typeof value !== 'object') out[fieldPath] = value;
+  }
+  return out;
+}
+
+function getPayloadPath(value, fieldPath) {
+  return String(fieldPath || '').split('.').filter(Boolean)
+    .reduce((current, key) => (current && typeof current === 'object' ? current[key] : undefined), value);
+}
+
+function readPayloadSamples(logDir, options) {
+  const now = Date.now();
+  const endTime = Number.isFinite(options.endTime) ? options.endTime : now;
+  const minutes = Math.min(1440, Math.max(1, options.minutes || DEFAULT_STATUS_MINUTES));
+  const startTime = Number.isFinite(options.startTime) ? options.startTime : endTime - minutes * 60_000;
+  const limit = Math.min(50, Math.max(1, options.limit || DEFAULT_PAYLOAD_SAMPLE_LIMIT));
+  const previewChars = Math.min(2000, Math.max(0, options.payloadPreviewChars ?? DEFAULT_PAYLOAD_PREVIEW_CHARS));
+  const fieldPaths = Array.isArray(options.payloadFields) ? options.payloadFields : [];
+  const topic = options.topic && options.topic.trim() ? options.topic.trim() : null;
+  const topicKeyword = normalizeKeyword(options.topicKeyword || '');
+  const keyword = normalizeKeyword(options.keyword || '');
+  const connectionIds = options.connectionId ? [options.connectionId] : listLogConnectionIds(logDir);
+  const secMin = Math.floor(Math.max(startTime, -8640000000) / 1000);
+  const secMax = Math.ceil(Math.min(endTime, 8640000000000) / 1000);
+  const samples = [];
+
+  for (const connectionId of connectionIds) {
+    const files = listDayFiles(logDir, connectionId, true)
+      .filter((filePath) => {
+        const dayKey = path.basename(filePath, '.db');
+        return dayEndTsFromKey(dayKey) >= startTime && dayStartTsFromKey(dayKey) <= endTime;
+      });
+
+    for (const filePath of files) {
+      if (samples.length >= limit) break;
+      const db = new Database(filePath, { readonly: true, fileMustExist: true });
+      try {
+        let sql = 'SELECT bucket_ts, topic, blob FROM buckets WHERE bucket_ts BETWEEN ? AND ?';
+        const params = [secMin, secMax];
+        if (topic) {
+          sql += ' AND topic = ?';
+          params.push(topic);
+        }
+        sql += ' ORDER BY bucket_ts DESC';
+        const rows = db.prepare(sql).all(...params);
+        for (const row of rows) {
+          if (samples.length >= limit) break;
+          if (topicKeyword && !normalizeKeyword(row.topic).includes(topicKeyword)) continue;
+          const decoded = decodeBucket(row.blob, row.bucket_ts, row.topic, connectionId);
+          for (let i = decoded.length - 1; i >= 0; i--) {
+            const message = decoded[i];
+            if (message.time < startTime || message.time > endTime) continue;
+            if (keyword && !normalizeKeyword(message.topic + message.payload).includes(keyword)) continue;
+            samples.push({
+              time: message.time,
+              localTime: formatLocalTime(message.time),
+              topic: message.topic,
+              payload: summarizePayload(message.payload, previewChars, fieldPaths)
+            });
+            if (samples.length >= limit) break;
+          }
+        }
+      } finally {
+        db.close();
+      }
+    }
+  }
+
+  samples.sort((a, b) => b.time - a.time);
+  return {
+    startTime,
+    endTime,
+    startLocalTime: formatLocalTime(startTime),
+    endLocalTime: formatLocalTime(endTime),
+    samples: samples.slice(0, limit)
+  };
+}
+
+function readMessageStatus(logDir, options) {
+  const now = Date.now();
+  const endTime = Number.isFinite(options.endTime) ? options.endTime : now;
+  const minutes = Math.min(1440, Math.max(1, options.minutes || DEFAULT_STATUS_MINUTES));
+  const startTime = Number.isFinite(options.startTime) ? options.startTime : endTime - minutes * 60_000;
+  const topic = options.topic && options.topic.trim() ? options.topic.trim() : null;
+  const topicKeyword = normalizeKeyword(options.topicKeyword || '');
+  const keyword = normalizeKeyword(options.keyword || '');
+  const topicLimit = Math.min(50, Math.max(1, options.topicLimit || DEFAULT_STATUS_TOPIC_LIMIT));
+  const sampleLimit = Math.min(10, Math.max(0, options.sampleLimit || 0));
+  const payloadPreviewChars = Math.min(500, Math.max(0, options.payloadPreviewChars || 0));
+  const connectionIds = options.connectionId ? [options.connectionId] : listLogConnectionIds(logDir);
+  const secMin = Math.floor(Math.max(startTime, -8640000000) / 1000);
+  const secMax = Math.ceil(Math.min(endTime, 8640000000000) / 1000);
+  const topicStats = new Map();
+  const samples = [];
+  let total = 0;
+  let latestTime = null;
+
+  for (const connectionId of connectionIds) {
+    const files = listDayFiles(logDir, connectionId, true)
+      .filter((filePath) => {
+        const dayKey = path.basename(filePath, '.db');
+        return dayEndTsFromKey(dayKey) >= startTime && dayStartTsFromKey(dayKey) <= endTime;
+      });
+
+    for (const filePath of files) {
+      const db = new Database(filePath, { readonly: true, fileMustExist: true });
+      try {
+        let sql = 'SELECT bucket_ts, topic, blob FROM buckets WHERE bucket_ts BETWEEN ? AND ?';
+        const params = [secMin, secMax];
+        if (topic) {
+          sql += ' AND topic = ?';
+          params.push(topic);
+        }
+        sql += ' ORDER BY bucket_ts DESC';
+        const rows = db.prepare(sql).all(...params);
+        for (const row of rows) {
+          if (topicKeyword && !normalizeKeyword(row.topic).includes(topicKeyword)) continue;
+          const decoded = decodeBucket(row.blob, row.bucket_ts, row.topic, connectionId);
+          for (let i = decoded.length - 1; i >= 0; i--) {
+            const message = decoded[i];
+            if (message.time < startTime || message.time > endTime) continue;
+            if (keyword && !normalizeKeyword(message.topic + message.payload).includes(keyword)) continue;
+
+            total += 1;
+            latestTime = latestTime === null ? message.time : Math.max(latestTime, message.time);
+            const stat = topicStats.get(message.topic) || { topic: message.topic, count: 0, latestTime: message.time };
+            stat.count += 1;
+            stat.latestTime = Math.max(stat.latestTime, message.time);
+            topicStats.set(message.topic, stat);
+            if (samples.length < sampleLimit) {
+              const sample = {
+                time: message.time,
+                localTime: formatLocalTime(message.time),
+                topic: message.topic
+              };
+              const payloadPreview = previewPayload(message.payload, payloadPreviewChars);
+              if (payloadPreview) sample.payloadPreview = payloadPreview;
+              samples.push(sample);
+            }
+          }
+        }
+      } finally {
+        db.close();
+      }
+    }
+  }
+
+  const topics = [...topicStats.values()]
+    .sort((a, b) => b.latestTime - a.latestTime || b.count - a.count)
+    .slice(0, topicLimit)
+    .map((item) => ({
+      topic: item.topic,
+      count: item.count,
+      latestTime: item.latestTime,
+      latestLocalTime: formatLocalTime(item.latestTime)
+    }));
+
+  return {
+    hasMessages: total > 0,
+    total,
+    startTime,
+    endTime,
+    startLocalTime: formatLocalTime(startTime),
+    endLocalTime: formatLocalTime(endTime),
+    latestTime,
+    latestLocalTime: formatLocalTime(latestTime),
+    topics,
+    samples
+  };
 }
 
 function queryHistory(logDir, options) {
@@ -283,15 +594,88 @@ async function main() {
       title: 'Read Recent MQTT Messages',
       description: 'Read recent persisted MQTT messages for a MQTTMountain connection.',
       inputSchema: z.object({
-        connectionId: z.string().describe('MQTTMountain connection id. Use mqttmountain_connections first if unsure.'),
+        connectionId: z.string().optional().describe('MQTTMountain connection id. Use mqttmountain_connections first if unsure.'),
+        connectionName: z.string().optional().describe('MQTTMountain connection name, for example "深圳星扬".'),
+        connectionKeyword: z.string().optional().describe('Fuzzy connection keyword, for example "深圳星扬" or "xingyang-szga".'),
+        topic: z.string().optional().describe('Exact MQTT topic filter.'),
         limit: z.number().int().min(1).max(MAX_LIMIT).default(100)
       })
     },
-    async ({ connectionId, limit }) => jsonText({
-      logDir,
-      connectionId,
-      messages: readRecentMessages(logDir, connectionId, limit)
-    })
+    async (input) => {
+      const connectionId = resolveConnectionId(userDataDir, logDir, input);
+      if (!connectionId) throw new Error('connectionId or connectionName is required.');
+      return jsonText({
+        logDir,
+        connectionId,
+        connectionName: input.connectionName,
+        topic: input.topic,
+        messages: readRecentMessages(logDir, connectionId, input.limit, input.topic)
+      });
+    }
+  );
+
+  server.registerTool(
+    'mqttmountain_message_status',
+    {
+      title: 'Read Compact MQTT Message Status',
+      description: 'One-call compact summary for checking whether recent messages arrived. Returns counts, latest time, and hot topics without full payloads by default.',
+      inputSchema: z.object({
+        connectionId: z.string().optional().describe('Optional MQTTMountain connection id.'),
+        connectionName: z.string().optional().describe('Optional exact MQTTMountain connection name.'),
+        connectionKeyword: z.string().optional().describe('Fuzzy connection keyword, for example "深圳星扬" or "xingyang-szga".'),
+        topic: z.string().optional().describe('Exact MQTT topic filter.'),
+        topicKeyword: z.string().optional().describe('Substring search in topic only.'),
+        keyword: z.string().optional().describe('Substring search across topic and payload. Whitespace is ignored.'),
+        minutes: z.number().int().min(1).max(1440).default(DEFAULT_STATUS_MINUTES).describe('Lookback window in minutes when startTime is omitted.'),
+        startTime: z.number().optional().describe('Start timestamp in milliseconds since Unix epoch.'),
+        endTime: z.number().optional().describe('End timestamp in milliseconds since Unix epoch. Defaults to now.'),
+        topicLimit: z.number().int().min(1).max(50).default(DEFAULT_STATUS_TOPIC_LIMIT),
+        sampleLimit: z.number().int().min(0).max(10).default(0).describe('Number of recent sample messages to include. Defaults to 0 to save tokens.'),
+        payloadPreviewChars: z.number().int().min(0).max(500).default(0).describe('Payload preview length for samples. Defaults to 0 to save tokens.')
+      })
+    },
+    async (input) => {
+      const connectionId = resolveConnectionId(userDataDir, logDir, input);
+      const query = connectionId ? { ...input, connectionId } : input;
+      return jsonText({
+        connectionId,
+        connectionName: input.connectionName,
+        connectionKeyword: input.connectionKeyword,
+        status: readMessageStatus(logDir, query)
+      });
+    }
+  );
+
+  server.registerTool(
+    'mqttmountain_payload_samples',
+    {
+      title: 'Read Compact MQTT Payload Samples',
+      description: 'Read latest payload samples with compact JSON keys, common fields, and short previews.',
+      inputSchema: z.object({
+        connectionId: z.string().optional().describe('Optional MQTTMountain connection id.'),
+        connectionName: z.string().optional().describe('Optional exact MQTTMountain connection name.'),
+        connectionKeyword: z.string().optional().describe('Fuzzy connection keyword, for example "深圳星扬" or "xingyang-szga".'),
+        topic: z.string().optional().describe('Exact MQTT topic filter.'),
+        topicKeyword: z.string().optional().describe('Substring search in topic only.'),
+        keyword: z.string().optional().describe('Substring search across topic and payload. Whitespace is ignored.'),
+        minutes: z.number().int().min(1).max(1440).default(DEFAULT_STATUS_MINUTES).describe('Lookback window in minutes when startTime is omitted.'),
+        startTime: z.number().optional().describe('Start timestamp in milliseconds since Unix epoch.'),
+        endTime: z.number().optional().describe('End timestamp in milliseconds since Unix epoch. Defaults to now.'),
+        limit: z.number().int().min(1).max(50).default(DEFAULT_PAYLOAD_SAMPLE_LIMIT),
+        payloadPreviewChars: z.number().int().min(0).max(2000).default(DEFAULT_PAYLOAD_PREVIEW_CHARS),
+        payloadFields: z.array(z.string()).optional().describe('Extra JSON field paths to extract, for example ["data.battery","data.mode_code"].')
+      })
+    },
+    async (input) => {
+      const connectionId = resolveConnectionId(userDataDir, logDir, input);
+      const query = connectionId ? { ...input, connectionId } : input;
+      return jsonText({
+        connectionId,
+        connectionName: input.connectionName,
+        connectionKeyword: input.connectionKeyword,
+        result: readPayloadSamples(logDir, query)
+      });
+    }
   );
 
   server.registerTool(
@@ -301,6 +685,8 @@ async function main() {
       description: 'Query persisted MQTTMountain messages by connection, topic, keyword, and timestamp range.',
       inputSchema: z.object({
         connectionId: z.string().optional().describe('Optional MQTTMountain connection id. Omit to search all log folders.'),
+        connectionName: z.string().optional().describe('Optional MQTTMountain connection name, for example "深圳星扬".'),
+        connectionKeyword: z.string().optional().describe('Fuzzy connection keyword, for example "深圳星扬" or "xingyang-szga".'),
         topic: z.string().optional().describe('Exact MQTT topic filter.'),
         keyword: z.string().optional().describe('Substring search across topic and payload. Whitespace is ignored.'),
         startTime: z.number().optional().describe('Start timestamp in milliseconds since Unix epoch.'),
@@ -308,11 +694,15 @@ async function main() {
         limit: z.number().int().min(1).max(MAX_LIMIT).default(200)
       })
     },
-    async (input) => jsonText({
-      logDir,
-      query: input,
-      messages: queryHistory(logDir, input)
-    })
+    async (input) => {
+      const connectionId = resolveConnectionId(userDataDir, logDir, input);
+      const query = connectionId ? { ...input, connectionId } : input;
+      return jsonText({
+        logDir,
+        query,
+        messages: queryHistory(logDir, query)
+      });
+    }
   );
 
   await server.connect(new StdioServerTransport());
