@@ -1,15 +1,18 @@
+﻿
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue';
 import { useConnectionStore } from '@/stores/connection';
 import { useToast } from '@/composables/useToast';
 import { useFormatViewer } from '@/composables/useFormatViewer';
+import { useMqttReplay, type ReplaySpeed } from '@/composables/useMqttReplay';
 import type { HistoryMessage } from '@shared/types';
 import { datetimeLocalToTs, formatTime, shortTime, tsToDatetimeLocal } from '@/utils/format';
 import { exportMqttxJson, exportGroupedZip } from '@/utils/exporter';
+import { parseReplayFile, replayRowsFromHistory, type ReplayMessage } from '@/utils/replay';
 import { highlight, type SearchLogic } from '@/utils/filter';
 
 const formatViewer = useFormatViewer();
-
+const replay = useMqttReplay();
 const conn = useConnectionStore();
 const toast = useToast();
 
@@ -22,6 +25,14 @@ const rows = ref<HistoryMessage[]>([]);
 const selectedTopic = ref<string | null>(null);
 const loading = ref(false);
 
+const replayQos = ref<0 | 1 | 2>(0);
+const replayRetain = ref(false);
+const replaySpeed = ref<ReplaySpeed>('10x');
+const replayRewriteTimestamps = ref(false);
+const importedRows = ref<ReplayMessage[]>([]);
+const importedName = ref('');
+const fileInput = ref<HTMLInputElement | null>(null);
+
 type TopicSort = 'name' | 'count' | 'recent';
 const topicSort = ref<TopicSort>('name');
 
@@ -30,6 +41,13 @@ interface TopicGroup {
     items: HistoryMessage[];
     lastTime: number;
 }
+
+const canReplayToMqtt = computed(() => Boolean(conn.selectedId) && conn.selectedState === 'connected');
+const replayHint = computed(() => {
+    if (!conn.selectedId) return '请先选择一个目标连接';
+    if (conn.selectedState !== 'connected') return '目标连接需要处于已连接状态';
+    return `将真实发布到当前连接：${conn.selected?.name || conn.selectedId}`;
+});
 
 const grouped = computed<TopicGroup[]>(() => {
     const m = new Map<string, { items: HistoryMessage[]; lastTime: number }>();
@@ -171,16 +189,70 @@ async function exportZip(): Promise<void> {
     toast.success(`已导出 ${rows.value.length} 条`);
 }
 
+async function startReplayRows(sourceName: string, replayRows: ReplayMessage[]): Promise<void> {
+    if (!conn.selectedId) {
+        toast.error('请先选择目标连接');
+        return;
+    }
+    if (conn.selectedState !== 'connected') {
+        toast.error('目标连接未连接，无法真实重放');
+        return;
+    }
+    if (!replayRows.length) {
+        toast.warning('没有可回放的数据');
+        return;
+    }
+    try {
+        await replay.start(sourceName, {
+            connectionId: conn.selectedId,
+            rows: replayRows,
+            speed: replaySpeed.value,
+            timestampRewrite: replayRewriteTimestamps.value ? 'on' : 'off'
+        });
+    } catch (error) {
+        toast.error((error as Error).message || '回放启动失败');
+    }
+}
+
+async function replayHistoryRows(): Promise<void> {
+    await startReplayRows('历史查询结果', replayRowsFromHistory(rows.value, replayQos.value, replayRetain.value));
+}
+
+function openImport(): void {
+    fileInput.value?.click();
+}
+
+async function onImportChange(event: Event): Promise<void> {
+    const input = event.target as HTMLInputElement;
+    const file = input.files?.[0];
+    if (!file) return;
+    try {
+        importedRows.value = await parseReplayFile(file);
+        importedName.value = file.name;
+        toast.success(`已导入 ${importedRows.value.length} 条回放数据`);
+    } catch (error) {
+        importedRows.value = [];
+        importedName.value = '';
+        toast.error((error as Error).message || '导入失败');
+    } finally {
+        input.value = '';
+    }
+}
+
+async function replayImportedRows(): Promise<void> {
+    await startReplayRows(importedName.value || '导入文件', importedRows.value);
+}
+
 onMounted(init);
 </script>
 
 <template>
     <section class="panel">
         <div class="panel-head">
-            <h2>🔍 历史查询</h2>
+            <h2>历史查询</h2>
             <span class="spacer"></span>
-            <button v-if="rows.length" class="btn btn-mini" @click="exportJson" title="导出完整 JSON">📥</button>
-            <button v-if="rows.length" class="btn btn-mini" @click="exportZip" title="按主题分组 ZIP">📦</button>
+            <button v-if="rows.length" class="btn btn-mini" @click="exportJson" title="导出完整 JSON">导出 JSON</button>
+            <button v-if="rows.length" class="btn btn-mini" @click="exportZip" title="按主题分组 ZIP">导出 ZIP</button>
         </div>
         <div class="panel-body">
             <div class="controls">
@@ -206,7 +278,7 @@ onMounted(init);
                             <div v-for="(_, index) in keywordInputs" :key="index" class="filter-condition">
                                 <span v-if="index > 0" class="logic-label">{{ keywordLogic === 'and' ? '且' : '或' }}</span>
                                 <input v-model="keywordInputs[index]" placeholder="主题或内容" @keydown.enter="query" />
-                                <button class="condition-btn" title="删除条件" @click="removeKeywordCondition(index)">×</button>
+                                <button class="condition-btn" title="删除条件" @click="removeKeywordCondition(index)">x</button>
                             </div>
                             <button class="condition-add" title="添加过滤条件" @click="addKeywordCondition">+ 条件</button>
                         </div>
@@ -220,12 +292,11 @@ onMounted(init);
                     </select>
                 </div>
                 <button class="btn btn-primary query-btn" :disabled="loading" @click="query">
-                    {{ loading ? '查询中…' : '🔎 查询' }}
+                    {{ loading ? '查询中...' : '查询' }}
                 </button>
             </div>
-
             <div class="quick-bar">
-                <span class="quick-label">快速选择：</span>
+                <span class="quick-label">快速选择</span>
                 <button
                     v-for="q in quickRanges"
                     :key="q.key"
@@ -235,9 +306,64 @@ onMounted(init);
                 >{{ q.label }}</button>
             </div>
 
+            <div class="replay-panel">
+                <div class="replay-head">
+                    <strong>真实 MQTT 重放</strong>
+                    <span class="replay-hint">{{ replayHint }}</span>
+                </div>
+                <div class="replay-controls">
+                    <div class="field small">
+                        <label>QoS</label>
+                        <select v-model.number="replayQos">
+                            <option :value="0">0</option>
+                            <option :value="1">1</option>
+                            <option :value="2">2</option>
+                        </select>
+                    </div>
+                    <div class="field small">
+                        <label>Retain</label>
+                        <select :value="replayRetain ? 'true' : 'false'" @change="replayRetain = ($event.target as HTMLSelectElement).value === 'true'">
+                            <option value="false">false</option>
+                            <option value="true">true</option>
+                        </select>
+                    </div>
+                    <div class="field small">
+                        <label>节奏</label>
+                        <select v-model="replaySpeed">
+                            <option value="instant">立即发送</option>
+                            <option value="10x">10x</option>
+                            <option value="5x">5x</option>
+                            <option value="2x">2x</option>
+                            <option value="1x">1x</option>
+                        </select>
+                    </div>
+                    <div
+                        class="replay-switch-row"
+                        title="仅对合法 JSON：毫秒级(≥1e12)→当前毫秒；秒级(1e9~1e12)→当前秒"
+                    >
+                        <span class="replay-switch-label">时间戳→当前</span>
+                        <label class="switch" :title="replayRewriteTimestamps ? '已开启' : '已关闭'">
+                            <input v-model="replayRewriteTimestamps" type="checkbox" />
+                            <span class="slider" :class="{ on: replayRewriteTimestamps }"></span>
+                        </label>
+                    </div>
+                    <button class="btn" :disabled="!rows.length || !canReplayToMqtt || replay.state.running" @click="replayHistoryRows">重放查询结果</button>
+                    <button class="btn" :disabled="replay.state.running" @click="openImport">导入文件</button>
+                    <button class="btn" :disabled="!importedRows.length || !canReplayToMqtt || replay.state.running" @click="replayImportedRows">重放导入数据</button>
+                    <button class="btn btn-danger" :disabled="!replay.state.running" @click="replay.stop()">停止</button>
+                    <input ref="fileInput" type="file" accept=".json,.jsonl,.zip" class="hidden-file" @change="onImportChange" />
+                </div>
+                <div class="replay-meta">
+                    <span v-if="importedRows.length">已导入：{{ importedName }} / {{ importedRows.length }} 条</span>
+                    <span v-if="replay.state.running">运行中：{{ replay.state.sent }}/{{ replay.state.total }}，失败 {{ replay.state.failed }}</span>
+                    <span v-else-if="replay.state.total">上次任务：{{ replay.state.sourceName }}，成功 {{ replay.state.sent }} / {{ replay.state.total }}</span>
+                    <span v-if="replay.state.lastError" class="replay-error">最近错误：{{ replay.state.lastError }}</span>
+                </div>
+            </div>
+
             <div v-if="rows.length === 0" class="empty">
-                <div v-if="loading">查询中，请稍候…</div>
-                <div v-else>设置时间范围与关键字后点击「查询」</div>
+                <div v-if="loading">查询中，请稍候...</div>
+                <div v-else>设置时间范围和关键字后点击“查询”</div>
             </div>
 
             <div v-else class="split">
@@ -384,7 +510,6 @@ onMounted(init);
         min-width: 0;
     }
 }
-
 .logic-label {
     color: var(--text-3);
     font-size: 12px;
@@ -432,7 +557,7 @@ onMounted(init);
     flex-wrap: wrap;
     padding: 4px 2px 8px;
     border-bottom: 1px dashed var(--border);
-    margin-bottom: 4px;
+    margin-bottom: 10px;
 
     .quick-label {
         font-size: 11px;
@@ -449,7 +574,6 @@ onMounted(init);
         padding: 3px 10px;
         border-radius: 999px;
         cursor: pointer;
-        transition: background 0.12s, border-color 0.12s, color 0.12s;
 
         &:hover {
             background: var(--card-hover-bg);
@@ -462,6 +586,110 @@ onMounted(init);
             color: #fff;
         }
     }
+}
+
+.replay-panel {
+    margin-bottom: 12px;
+    padding: 12px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--panel-body-bg);
+}
+
+.replay-head {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: baseline;
+    margin-bottom: 8px;
+}
+
+.replay-hint {
+    color: var(--text-3);
+    font-size: 12px;
+}
+
+.replay-controls {
+    display: flex;
+    gap: 8px;
+    align-items: end;
+    flex-wrap: wrap;
+}
+
+.field.small {
+    min-width: 110px;
+}
+
+.replay-switch-row {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding-bottom: 2px;
+}
+
+.replay-switch-label {
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--text-2);
+    white-space: nowrap;
+}
+
+.replay-switch-row .switch {
+    display: inline-flex;
+    align-items: center;
+    cursor: pointer;
+    user-select: none;
+
+    input {
+        display: none;
+    }
+
+    .slider {
+        width: 36px;
+        height: 20px;
+        border-radius: 999px;
+        background: var(--border-strong);
+        position: relative;
+        transition: background 0.15s;
+
+        &::after {
+            content: '';
+            position: absolute;
+            width: 16px;
+            height: 16px;
+            border-radius: 50%;
+            background: #fff;
+            top: 2px;
+            left: 2px;
+            transition: left 0.15s;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+        }
+
+        &.on {
+            background: linear-gradient(135deg, #7c5cff, #5b8def);
+
+            &::after {
+                left: 18px;
+            }
+        }
+    }
+}
+
+.hidden-file {
+    display: none;
+}
+
+.replay-meta {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-top: 8px;
+    color: var(--text-2);
+    font-size: 12px;
+}
+
+.replay-error {
+    color: #fca5a5;
 }
 
 .split {
@@ -557,7 +785,6 @@ onMounted(init);
     border: 1px solid var(--border);
     background: var(--card-bg);
     cursor: pointer;
-    transition: background 0.12s, border-color 0.12s;
 
     &:hover {
         background: var(--card-hover-bg);
@@ -593,7 +820,6 @@ onMounted(init);
     }
 }
 
-/* 消息卡片（和 MessageViewer 一致） */
 .msg-list {
     padding: 6px;
     display: flex;
