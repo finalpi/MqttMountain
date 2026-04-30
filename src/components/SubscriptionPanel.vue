@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue';
+import { ref, computed, watch } from 'vue';
 import { useConnectionStore } from '@/stores/connection';
 import { useToast } from '@/composables/useToast';
 import { useUiPrefs } from '@/composables/useUiPrefs';
@@ -16,6 +16,18 @@ const isOpen = computed(() => prefs.activeRight === 'sub');
 
 const selected = computed(() => conn.selected);
 const canOp = computed(() => conn.selectedState === 'connected');
+
+watch(
+    () => selected.value?.id,
+    async (id) => {
+        if (!id) return;
+        const before = selected.value?.subscriptions.length ?? 0;
+        conn.sanitizeConnections();
+        const after = conn.selected?.subscriptions.length ?? 0;
+        if (after < before) await conn.persist();
+    },
+    { immediate: true }
+);
 
 async function doSubscribe(): Promise<void> {
     const c = selected.value;
@@ -105,8 +117,8 @@ const orderedSubs = computed<SubscriptionConfig[]>(() => {
             <div class="list">
                 <div v-if="!selected || selected.subscriptions.length === 0" class="empty">暂无订阅</div>
                 <div
-                    v-for="s in orderedSubs"
-                    :key="s.topic"
+                    v-for="(s, index) in orderedSubs"
+                    :key="`${s.topic}:${s.qos}:${index}`"
                     class="item"
                     :class="{ paused: s.paused }"
                 >

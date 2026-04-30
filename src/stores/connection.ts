@@ -5,6 +5,88 @@ import { randomClientId, randomId } from '@/utils/format';
 
 export type ConnState = 'connected' | 'reconnecting' | 'offline' | 'closed' | 'error' | 'idle';
 
+function normalizeSubscriptions(subscriptions: unknown): SubscriptionConfig[] {
+    if (!Array.isArray(subscriptions)) return [];
+    const seen = new Set<string>();
+    const result: SubscriptionConfig[] = [];
+    for (const item of subscriptions) {
+        if (!item || typeof item !== 'object') continue;
+        const topic = String((item as { topic?: unknown }).topic ?? '').trim();
+        if (!topic || seen.has(topic)) continue;
+        const qosValue = Number((item as { qos?: unknown }).qos);
+        const qos: 0 | 1 | 2 = qosValue === 1 || qosValue === 2 ? qosValue : 0;
+        const paused = 'paused' in item ? Boolean((item as { paused?: unknown }).paused) : undefined;
+        seen.add(topic);
+        result.push({ topic, qos, paused });
+    }
+    return result;
+}
+
+function normalizeDisabledTopics(disabledTopics: unknown): string[] {
+    if (!Array.isArray(disabledTopics)) return [];
+    const seen = new Set<string>();
+    const result: string[] = [];
+    for (const item of disabledTopics) {
+        const topic = String(item ?? '').trim();
+        if (!topic || seen.has(topic)) continue;
+        seen.add(topic);
+        result.push(topic);
+    }
+    return result;
+}
+
+function connectionEndpointKey(raw: Pick<ConnectionConfig, 'host' | 'port'>): string {
+    return `${String(raw.host ?? '').trim().toLowerCase()}:${Number(raw.port) || 0}`;
+}
+
+export function normalizeConnectionConfig(raw: Partial<ConnectionConfig>): ConnectionConfig {
+    return {
+        id: String(raw.id ?? randomId()),
+        name: raw.name ?? '新连接',
+        protocol: raw.protocol ?? 'mqtt://',
+        host: raw.host ?? 'broker.emqx.io',
+        port: Number(raw.port) || 1883,
+        path: raw.path ?? '/mqtt',
+        username: raw.username ?? '',
+        password: raw.password ?? '',
+        clientId: raw.clientId ?? randomClientId(),
+        subscriptions: normalizeSubscriptions(raw.subscriptions),
+        disabledTopics: normalizeDisabledTopics(raw.disabledTopics),
+        createdAt: raw.createdAt ?? Date.now(),
+        updatedAt: raw.updatedAt ?? Date.now()
+    };
+}
+
+function normalizeConnectionList(connections: ConnectionConfig[]): ConnectionConfig[] {
+    const merged = new Map<string, ConnectionConfig>();
+    for (const item of connections) {
+        const current = normalizeConnectionConfig(item);
+        const key = connectionEndpointKey(current);
+        const existing = merged.get(key);
+        if (!existing) {
+            merged.set(key, current);
+            continue;
+        }
+
+        merged.set(key, {
+            ...existing,
+            name: existing.name || current.name,
+            protocol: existing.protocol || current.protocol,
+            host: existing.host || current.host,
+            port: existing.port || current.port,
+            path: existing.path || current.path,
+            username: existing.username || current.username,
+            password: existing.password || current.password,
+            clientId: existing.clientId || current.clientId,
+            subscriptions: normalizeSubscriptions([...existing.subscriptions, ...current.subscriptions]),
+            disabledTopics: normalizeDisabledTopics([...existing.disabledTopics, ...current.disabledTopics]),
+            createdAt: Math.min(existing.createdAt, current.createdAt),
+            updatedAt: Math.max(existing.updatedAt, current.updatedAt)
+        });
+    }
+    return [...merged.values()];
+}
+
 export const useConnectionStore = defineStore('connection', () => {
     const list = ref<ConnectionConfig[]>([]);
     const selectedId = ref<string | null>(null);
@@ -21,7 +103,7 @@ export const useConnectionStore = defineStore('connection', () => {
     async function load(): Promise<void> {
         const r = await window.api.configRead();
         if (r.success && r.data) {
-            list.value = r.data.connections ?? [];
+            list.value = normalizeConnectionList(r.data.connections ?? []);
             selectedId.value = r.data.selectedId ?? list.value[0]?.id ?? null;
         }
     }
@@ -98,6 +180,11 @@ export const useConnectionStore = defineStore('connection', () => {
         dirty.value = true;
     }
 
+    function sanitizeConnections(): void {
+        list.value = normalizeConnectionList(list.value);
+        dirty.value = true;
+    }
+
     function addSubscription(id: string, sub: SubscriptionConfig): void {
         const c = list.value.find((x) => x.id === id);
         if (!c) return;
@@ -149,6 +236,7 @@ export const useConnectionStore = defineStore('connection', () => {
         remove,
         duplicate,
         update,
+        sanitizeConnections,
         addSubscription,
         removeSubscription,
         setSubscriptionPaused,

@@ -15,6 +15,7 @@ const { sync: syncSubs, reset: resetSubs } = useSubscriptionSync();
 const showPassword = ref(false);
 const connecting = ref(false);
 const fileInput = ref<HTMLInputElement | null>(null);
+let recentHydrateToken = 0;
 
 const selected = computed(() => conn.selected);
 const isConnected = computed(() => conn.selectedState === 'connected' || conn.selectedState === 'reconnecting');
@@ -85,23 +86,36 @@ async function doConnect(): Promise<void> {
         await syncSubs(c, true);
 
         // 为该连接的 bucket 预填历史（不影响其他连接）
-        msg.clearAll(c.id);
-        const recent = await window.api.mqttReadRecent({ connectionId: c.id, limit: 2000 });
-        if (recent.success && recent.data) {
-            const decoded = await window.api.pluginDecodeBatch(
-                recent.data.map((item) => ({ topic: item.topic, payload: item.payload }))
-            );
-            msg.hydrate(c.id, recent.data, decoded.success ? decoded.data : undefined);
-        }
+        void hydrateRecentMessages(c.id);
         toast.success(wasDirty ? `已连接：${label}（配置已自动保存）` : `已连接：${label}`);
     } finally {
         connecting.value = false;
     }
 }
 
+async function hydrateRecentMessages(connectionId: string): Promise<void> {
+    const token = ++recentHydrateToken;
+    msg.clearAll(connectionId);
+    const recent = await window.api.mqttReadRecent({ connectionId, limit: 300 });
+    if (token !== recentHydrateToken || conn.selectedId !== connectionId) return;
+    if (!recent.success || !recent.data?.length) return;
+
+    let decodedBatch: Awaited<ReturnType<typeof window.api.pluginDecodeBatch>>['data'] | undefined;
+    try {
+        const decoded = await window.api.pluginDecodeBatch(
+            recent.data.map((item) => ({ topic: item.topic, payload: item.payload }))
+        );
+        if (token !== recentHydrateToken || conn.selectedId !== connectionId) return;
+        decodedBatch = decoded.success ? decoded.data : undefined;
+    } catch {}
+
+    msg.hydrate(connectionId, recent.data, decodedBatch);
+}
+
 async function doDisconnect(): Promise<void> {
     const c = selected.value;
     if (!c) return;
+    recentHydrateToken++;
     const label = c.name || `${c.host}:${c.port}`;
     await window.api.mqttDisconnect(c.id);
     conn.setState(c.id, 'closed');
@@ -173,6 +187,7 @@ async function onImportFile(e: Event): Promise<void> {
                 updatedAt: Date.now()
             });
         }
+        conn.sanitizeConnections();
         await conn.persist();
         toast.success(`已导入 ${arr.length} 个连接`);
     } catch (err) {

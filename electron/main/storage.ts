@@ -253,24 +253,31 @@ export function readRecentByConnection(connectionId: string, limit = 5000): Hist
     const san = sanitizeConnectionId(connectionId);
     const files = listDayFiles(san, true);
     const out: HistoryMessage[] = [];
-    let remaining = limit;
+    const bucketChunkSize = 256;
     for (const fp of files) {
-        if (remaining <= 0) break;
+        if (out.length >= limit) break;
         const db = new Database(fp, { readonly: true });
         try {
-            const rows = db.prepare('SELECT bucket_ts, topic, blob FROM buckets ORDER BY bucket_ts DESC').all() as {
-                bucket_ts: number; topic: string; blob: Buffer;
-            }[];
-            for (const r of rows) {
-                const arr = decodeBucket(r.blob, r.bucket_ts, r.topic);
-                for (let j = arr.length - 1; j >= 0; j--) {
-                    arr[j].connectionId = connectionId;
-                    out.push(arr[j]);
+            const stmt = db.prepare(
+                'SELECT bucket_ts, topic, blob FROM buckets ORDER BY bucket_ts DESC LIMIT ? OFFSET ?'
+            );
+            let offset = 0;
+            while (out.length < limit) {
+                const rows = stmt.all(bucketChunkSize, offset) as {
+                    bucket_ts: number; topic: string; blob: Buffer;
+                }[];
+                if (rows.length === 0) break;
+                for (const r of rows) {
+                    const arr = decodeBucket(r.blob, r.bucket_ts, r.topic);
+                    for (let j = arr.length - 1; j >= 0; j--) {
+                        arr[j].connectionId = connectionId;
+                        out.push(arr[j]);
+                        if (out.length >= limit) break;
+                    }
                     if (out.length >= limit) break;
                 }
-                if (out.length >= limit) break;
+                offset += rows.length;
             }
-            remaining = limit - out.length;
         } finally {
             db.close();
         }
