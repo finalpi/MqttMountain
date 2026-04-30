@@ -42,6 +42,20 @@ app.commandLine.appendSwitch('disable-renderer-backgrounding');
 app.commandLine.appendSwitch('disable-background-timer-throttling');
 app.commandLine.appendSwitch('enable-features', 'SharedArrayBuffer');
 
+const singleInstanceLock = app.requestSingleInstanceLock();
+if (!singleInstanceLock) {
+    app.quit();
+    process.exit(0);
+}
+
+function focusExistingWindow(): void {
+    if (!win || win.isDestroyed()) return;
+    if (win.isMinimized()) win.restore();
+    if (!win.isVisible()) win.show();
+    win.focus();
+    win.webContents.focus();
+}
+
 async function createWindow() {
     win = new BrowserWindow({
         width: 1480,
@@ -96,6 +110,10 @@ async function createWindow() {
     });
 }
 
+app.on('second-instance', () => {
+    focusExistingWindow();
+});
+
 app.whenReady().then(async () => {
     initSettings();
     initStorage(getCurrentLogDir());
@@ -126,6 +144,7 @@ app.on('window-all-closed', () => {
 
 app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    else focusExistingWindow();
 });
 
 export { win };

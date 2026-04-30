@@ -99,17 +99,7 @@ async function hydrateRecentMessages(connectionId: string): Promise<void> {
     const recent = await window.api.mqttReadRecent({ connectionId, limit: 300 });
     if (token !== recentHydrateToken || conn.selectedId !== connectionId) return;
     if (!recent.success || !recent.data?.length) return;
-
-    let decodedBatch: Awaited<ReturnType<typeof window.api.pluginDecodeBatch>>['data'] | undefined;
-    try {
-        const decoded = await window.api.pluginDecodeBatch(
-            recent.data.map((item) => ({ topic: item.topic, payload: item.payload }))
-        );
-        if (token !== recentHydrateToken || conn.selectedId !== connectionId) return;
-        decodedBatch = decoded.success ? decoded.data : undefined;
-    } catch {}
-
-    msg.hydrate(connectionId, recent.data, decodedBatch);
+    await msg.hydrate(connectionId, recent.data);
 }
 
 async function doDisconnect(): Promise<void> {

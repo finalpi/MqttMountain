@@ -217,18 +217,28 @@ export const useMessageStore = defineStore('messages', () => {
         b.paused = paused;
     }
 
-    function hydrate(connectionId: string, rows: { topic: string; payload: string; time: number }[], decodedBatch?: (DecodedResult | null)[]): void {
-        if (!connectionId || !rows.length) return;
-        const b = bucketFor(connectionId);
-        const ordered = rows.slice().sort((a, b2) => a.time - b2.time);
+    function buildDecodedByKey(
+        rows: { topic: string; payload: string; time: number }[],
+        decodedBatch?: (DecodedResult | null)[]
+    ): Map<string, DecodedResult | null> {
         const decodedByKey = new Map<string, DecodedResult | null>();
-        if (decodedBatch?.length) {
-            for (let i = 0; i < rows.length; i++) {
-                const source = rows[i];
-                decodedByKey.set(`${source.time}:${source.topic}:${source.payload}`, decodedBatch[i] ?? null);
-            }
+        if (!decodedBatch?.length) return decodedByKey;
+        for (let i = 0; i < rows.length; i++) {
+            const source = rows[i];
+            decodedByKey.set(`${source.time}:${source.topic}:${source.payload}`, decodedBatch[i] ?? null);
         }
-        for (const r of ordered) {
+        return decodedByKey;
+    }
+
+    function appendHydrateChunk(
+        b: MsgBucket,
+        rows: { topic: string; payload: string; time: number }[],
+        decodedByKey: Map<string, DecodedResult | null>,
+        start: number,
+        end: number
+    ): void {
+        for (let i = start; i < end; i++) {
+            const r = rows[i];
             const row: MsgRow = {
                 topic: r.topic,
                 payload: r.payload,
@@ -243,8 +253,23 @@ export const useMessageStore = defineStore('messages', () => {
             v.lastTime = r.time;
             v.lastSeq = row.seq;
         }
+        b.receiveCount += end - start;
         b.timelineVersion++;
         b.topicsVersion++;
+    }
+
+    async function hydrate(connectionId: string, rows: { topic: string; payload: string; time: number }[], decodedBatch?: (DecodedResult | null)[]): Promise<void> {
+        if (!connectionId || !rows.length) return;
+        const b = bucketFor(connectionId);
+        const ordered = rows.slice().sort((a, b2) => a.time - b2.time);
+        const decodedByKey = buildDecodedByKey(rows, decodedBatch);
+        const chunkSize = 100;
+        for (let i = 0; i < ordered.length; i += chunkSize) {
+            appendHydrateChunk(b, ordered, decodedByKey, i, Math.min(i + chunkSize, ordered.length));
+            if (i + chunkSize < ordered.length) {
+                await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+            }
+        }
     }
 
     /** 关闭连接（或删除配置）时清掉桶 */

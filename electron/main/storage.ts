@@ -258,12 +258,22 @@ export function readRecentByConnection(connectionId: string, limit = 5000): Hist
         if (out.length >= limit) break;
         const db = new Database(fp, { readonly: true });
         try {
-            const stmt = db.prepare(
-                'SELECT bucket_ts, topic, blob FROM buckets ORDER BY bucket_ts DESC LIMIT ? OFFSET ?'
+            const firstStmt = db.prepare(
+                'SELECT bucket_ts, topic, blob FROM buckets ORDER BY bucket_ts DESC, topic DESC LIMIT ?'
             );
-            let offset = 0;
+            const nextStmt = db.prepare(
+                `SELECT bucket_ts, topic, blob
+                 FROM buckets
+                 WHERE bucket_ts < ? OR (bucket_ts = ? AND topic < ?)
+                 ORDER BY bucket_ts DESC, topic DESC
+                 LIMIT ?`
+            );
+            let lastBucketTs: number | null = null;
+            let lastTopic: string | null = null;
             while (out.length < limit) {
-                const rows = stmt.all(bucketChunkSize, offset) as {
+                const rows = (lastBucketTs == null || lastTopic == null
+                    ? firstStmt.all(bucketChunkSize)
+                    : nextStmt.all(lastBucketTs, lastBucketTs, lastTopic, bucketChunkSize)) as {
                     bucket_ts: number; topic: string; blob: Buffer;
                 }[];
                 if (rows.length === 0) break;
@@ -276,7 +286,9 @@ export function readRecentByConnection(connectionId: string, limit = 5000): Hist
                     }
                     if (out.length >= limit) break;
                 }
-                offset += rows.length;
+                const tail = rows[rows.length - 1];
+                lastBucketTs = tail.bucket_ts;
+                lastTopic = tail.topic;
             }
         } finally {
             db.close();
