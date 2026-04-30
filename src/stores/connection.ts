@@ -35,8 +35,11 @@ function normalizeDisabledTopics(disabledTopics: unknown): string[] {
     return result;
 }
 
-function connectionEndpointKey(raw: Pick<ConnectionConfig, 'host' | 'port'>): string {
-    return `${String(raw.host ?? '').trim().toLowerCase()}:${Number(raw.port) || 0}`;
+function connectionEndpointKey(raw: Pick<ConnectionConfig, 'username' | 'host' | 'port'>): string {
+    const username = String(raw.username ?? '').trim().toLowerCase();
+    const host = String(raw.host ?? '').trim().toLowerCase();
+    const port = Number(raw.port) || 0;
+    return `${username}@${host}:${port}`;
 }
 
 export function normalizeConnectionConfig(raw: Partial<ConnectionConfig>): ConnectionConfig {
