@@ -147,6 +147,7 @@ const replyBlocks = computed<PluginReplyBlock[]>(() => {
     const blocks = decoded.value?.replyBlocks;
     return Array.isArray(blocks) ? blocks : [];
 });
+const previewReplyBlocks = computed<PluginReplyBlock[]>(() => (state.editable ? replyBlocks.value : []));
 
 /** 在已渲染 HTML 上套搜索高亮（遍历文本节点） */
 function applySearchHighlights(): void {
@@ -349,7 +350,7 @@ const title = computed(() => displayTopic.value || '消息内容');
                                 {{ decodedCollapsed ? '展开' : '收起' }}
                             </button>
                         </div>
-                        <div v-if="!decodedCollapsed && decodedDisplayItems.length && replyBlocks.length === 0" class="highlights">
+                        <div v-if="!decodedCollapsed && decodedDisplayItems.length && previewReplyBlocks.length === 0" class="highlights">
                             <div v-for="(h, i) in decodedDisplayItems" :key="i" class="hl-item">
                                 <span class="k">{{ h.label }}</span>
                                 <span class="v">{{ h.value }}</span>
@@ -367,9 +368,9 @@ const title = computed(() => displayTopic.value || '消息内容');
                                 <span>消息内容</span>
                                 <textarea v-model="state.draftRaw" spellcheck="false"></textarea>
                             </label>
-                            <div class="fv-body fv-preview" ref="bodyEl" :class="{ 'is-json': formatted.isJson, 'has-reply-blocks': replyBlocks.length > 0 }">
-                                <div v-if="replyBlocks.length" class="reply-block-list">
-                                    <section v-for="(block, idx) in replyBlocks" :key="idx" class="reply-block" :class="block.status || 'info'">
+                            <div class="fv-body fv-preview" ref="bodyEl" :class="{ 'is-json': formatted.isJson, 'has-reply-blocks': previewReplyBlocks.length > 0 }">
+                                <div v-if="previewReplyBlocks.length" class="reply-block-list">
+                                    <section v-for="(block, idx) in previewReplyBlocks" :key="idx" class="reply-block" :class="block.status || 'info'">
                                         <div class="reply-title">{{ block.title }}</div>
                                         <div v-if="block.summary" class="reply-summary">{{ block.summary }}</div>
                                         <div v-if="block.fields?.length" class="reply-fields">
@@ -410,10 +411,10 @@ const title = computed(() => displayTopic.value || '消息内容');
                         v-else
                         class="fv-body"
                         ref="bodyEl"
-                        :class="{ 'is-json': formatted.isJson, 'has-reply-blocks': replyBlocks.length > 0 }"
+                        :class="{ 'is-json': formatted.isJson, 'has-reply-blocks': previewReplyBlocks.length > 0 }"
                     >
-                        <div v-if="replyBlocks.length" class="reply-block-list">
-                            <section v-for="(block, idx) in replyBlocks" :key="idx" class="reply-block" :class="block.status || 'info'">
+                        <div v-if="previewReplyBlocks.length" class="reply-block-list">
+                            <section v-for="(block, idx) in previewReplyBlocks" :key="idx" class="reply-block" :class="block.status || 'info'">
                                 <div class="reply-title">{{ block.title }}</div>
                                 <div v-if="block.summary" class="reply-summary">{{ block.summary }}</div>
                                 <div v-if="block.fields?.length" class="reply-fields">
