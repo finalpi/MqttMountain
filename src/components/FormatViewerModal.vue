@@ -2,12 +2,16 @@
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
 import JsonTreeView from '@/components/JsonTreeView.vue';
 import { useFormatViewer } from '@/composables/useFormatViewer';
+import { useMessageStore, type MsgRow } from '@/stores/messages';
+import { useConnectionStore } from '@/stores/connection';
 import { useToast } from '@/composables/useToast';
 import { formatTime } from '@/utils/format';
 import { escapeHtml } from '@/utils/filter';
-import type { DecodedResult, PluginReplyBlock } from '@shared/plugin';
+import type { DecodedResult, PluginDecodedMeta, PluginReplyBlock } from '@shared/plugin';
 
 const { state, close, applyDraft, publishDraft, repeatHistory } = useFormatViewer();
+const msg = useMessageStore();
+const conn = useConnectionStore();
 const toast = useToast();
 
 const decoded = ref<DecodedResult | null>(null);
@@ -147,7 +151,45 @@ const replyBlocks = computed<PluginReplyBlock[]>(() => {
     const blocks = decoded.value?.replyBlocks;
     return Array.isArray(blocks) ? blocks : [];
 });
-const previewReplyBlocks = computed<PluginReplyBlock[]>(() => (state.editable ? replyBlocks.value : []));
+const previewReplyBlocks = computed<PluginReplyBlock[]>(() => (state.editable ? [] : replyBlocks.value));
+
+interface ReplyMatch {
+    row: MsgRow;
+}
+
+function normalizeMethod(value: unknown): string {
+    return typeof value === 'string' ? value.trim().toLowerCase() : '';
+}
+
+function isMatchingReply(meta: PluginDecodedMeta | undefined, target: PluginDecodedMeta): boolean {
+    if (!meta?.isReply) return false;
+    if (target.tid && meta.tid !== target.tid) return false;
+    if (target.bid && meta.bid !== target.bid) return false;
+    const targetMethod = normalizeMethod(target.method);
+    const metaMethod = normalizeMethod(meta.method);
+    if (targetMethod && metaMethod && metaMethod !== targetMethod) return false;
+    return Boolean(target.tid || target.bid || (targetMethod && metaMethod));
+}
+
+const actualReply = computed<ReplyMatch | null>(() => {
+    if (!state.editable || !state.publishTracking) return null;
+    const targetMeta = decoded.value?.meta;
+    if (!targetMeta) return null;
+    const connectionId = state.publishTracking.connectionId || state.connectionId || conn.selectedId;
+    if (!connectionId) return null;
+    const bucket = msg.bucketFor(connectionId);
+    void bucket.timelineVersion;
+    const rows = bucket.timeline.snapshot();
+    for (let i = rows.length - 1; i >= 0; i--) {
+        const row = rows[i];
+        if (row.time < state.publishTracking.sinceTime) continue;
+        if (!isMatchingReply(row.decoded?.meta, targetMeta)) continue;
+        return { row };
+    }
+    return null;
+});
+
+const previewReplyRaw = computed(() => actualReply.value?.row.payload || '');
 
 /** 在已渲染 HTML 上套搜索高亮（遍历文本节点） */
 function applySearchHighlights(): void {
@@ -350,7 +392,7 @@ const title = computed(() => displayTopic.value || '消息内容');
                                 {{ decodedCollapsed ? '展开' : '收起' }}
                             </button>
                         </div>
-                        <div v-if="!decodedCollapsed && decodedDisplayItems.length && previewReplyBlocks.length === 0" class="highlights">
+                        <div v-if="!decodedCollapsed && decodedDisplayItems.length && !state.editable" class="highlights">
                             <div v-for="(h, i) in decodedDisplayItems" :key="i" class="hl-item">
                                 <span class="k">{{ h.label }}</span>
                                 <span class="v">{{ h.value }}</span>
@@ -368,18 +410,16 @@ const title = computed(() => displayTopic.value || '消息内容');
                                 <span>消息内容</span>
                                 <textarea v-model="state.draftRaw" spellcheck="false"></textarea>
                             </label>
-                            <div class="fv-body fv-preview" ref="bodyEl" :class="{ 'is-json': formatted.isJson, 'has-reply-blocks': previewReplyBlocks.length > 0 }">
-                                <div v-if="previewReplyBlocks.length" class="reply-block-list">
-                                    <section v-for="(block, idx) in previewReplyBlocks" :key="idx" class="reply-block" :class="block.status || 'info'">
-                                        <div class="reply-title">{{ block.title }}</div>
-                                        <div v-if="block.summary" class="reply-summary">{{ block.summary }}</div>
-                                        <div v-if="block.fields?.length" class="reply-fields">
-                                            <div v-for="(field, fieldIdx) in block.fields" :key="fieldIdx" class="reply-field">
-                                                <span class="label">{{ field.label }}</span>
-                                                <span class="value">{{ field.value }}</span>
-                                            </div>
-                                        </div>
-                                    </section>
+                            <div v-if="state.publishTracking" class="reply-live" :class="{ matched: !!actualReply }">
+                                <span v-if="actualReply">
+                                    已收到真实回执 · {{ actualReply.row.topic }} · {{ formatTime(actualReply.row.time) }}
+                                </span>
+                                <span v-else>发送成功，等待真实回执...</span>
+                            </div>
+                            <div class="fv-body fv-preview" ref="bodyEl" :class="{ 'is-json': formatted.isJson && !previewReplyRaw }">
+                                <div v-if="previewReplyRaw" class="reply-raw-shell">
+                                    <div class="reply-raw-head">真实回执原文</div>
+                                    <pre class="fv-raw reply-raw" v-html="escapeHtml(previewReplyRaw)"></pre>
                                 </div>
                                 <JsonTreeView
                                     v-else-if="formatted.isJson"
@@ -577,8 +617,25 @@ const title = computed(() => displayTopic.value || '消息内容');
     min-width: 0;
     min-height: 0;
     display: grid;
-    grid-template-rows: auto minmax(240px, 1fr) minmax(180px, 0.75fr);
+    grid-template-rows: auto minmax(240px, 1fr) auto minmax(180px, 0.75fr);
     border-right: 1px solid var(--border);
+}
+
+.reply-live {
+    margin: 12px 16px 0;
+    padding: 10px 12px;
+    border: 1px dashed rgba(251, 191, 36, 0.45);
+    border-radius: 10px;
+    background: rgba(251, 191, 36, 0.08);
+    color: #fde68a;
+    font-size: 12px;
+    line-height: 1.5;
+
+    &.matched {
+        border-color: rgba(16, 185, 129, 0.45);
+        background: rgba(16, 185, 129, 0.1);
+        color: #bbf7d0;
+    }
 }
 
 .fv-edit-topic,
@@ -632,6 +689,24 @@ const title = computed(() => displayTopic.value || '消息内容');
 
 .fv-preview {
     border-top: 1px solid var(--border);
+}
+
+.reply-raw-shell {
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+.reply-raw-head {
+    padding: 10px 12px 0;
+    color: var(--text-2);
+    font-size: 11px;
+    font-weight: 700;
+}
+
+.reply-raw {
+    margin: 10px 12px 12px;
+    flex: 1;
 }
 
 .fv-history {

@@ -115,6 +115,7 @@ function openPayloadViewer(): void {
         autoFormat: true,
         editable: true,
         publishable: true,
+        connectionId: conn.selectedId,
         history: historyList.value.slice(0, 30),
         onApply: applyPayloadDraft,
         onPublish: publishPayloadDraft
@@ -160,6 +161,7 @@ async function publishMessage(draft?: PayloadDraft): Promise<void> {
         const item = { topic: nextTopic, payload: nextPayload, qos: qos.value, retain: retain.value, time: Date.now() };
         msg.pushPublishHistory(c.id, item);
         await window.api.publishHistoryAppend({ connectionId: c.id, ...item });
+        formatViewer.markPublished({ connectionId: c.id, sinceTime: item.time });
         // 发送成功后把当前 sender 的参数值记入历史，下次可下拉选择
         if (activeSender.value?.params) {
             for (const pr of activeSender.value.params) {

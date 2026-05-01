@@ -4,7 +4,7 @@ import { useMessageStore, type TopicView, type MsgRow } from '@/stores/messages'
 import { useConnectionStore } from '@/stores/connection';
 import { useToast } from '@/composables/useToast';
 import { useFormatViewer } from '@/composables/useFormatViewer';
-import { highlight, matchesSearchTerms, normalizeSearchTerms, type SearchLogic } from '@/utils/filter';
+import { highlight, normalize, type SearchLogic } from '@/utils/filter';
 import { formatTime, shortTime } from '@/utils/format';
 import { exportMqttxJson, exportGroupedZip } from '@/utils/exporter';
 
@@ -28,29 +28,53 @@ const placeholderTip = computed(() => {
 
 type ViewMode = 'timeline' | 'topic';
 const viewMode = ref<ViewMode>('topic');
-const filterInputs = ref<string[]>(['']);
-const activeFilterInputs = ref<string[]>(['']);
-const filterLogic = ref<SearchLogic>('and');
+type FilterJoin = SearchLogic | 'not';
+interface FilterCondition {
+    term: string;
+    join: FilterJoin;
+}
+const filterConditions = ref<FilterCondition[]>([{ term: '', join: 'and' }]);
+const activeFilterConditions = ref<FilterCondition[]>([{ term: '', join: 'and' }]);
 
 let filterTimer: number | null = null;
-watch(filterInputs, (v) => {
+watch(filterConditions, (v) => {
     if (filterTimer != null) clearTimeout(filterTimer);
-    filterTimer = window.setTimeout(() => (activeFilterInputs.value = [...v]), 120);
+    filterTimer = window.setTimeout(() => {
+        activeFilterConditions.value = v.map((item) => ({ term: item.term, join: item.join }));
+    }, 120);
 }, { deep: true });
 onUnmounted(() => { if (filterTimer != null) clearTimeout(filterTimer); });
 
-const filterTerms = computed(() => normalizeSearchTerms(activeFilterInputs.value));
+const highlightTerms = computed(() => activeFilterConditions.value.map((item) => item.term));
 
 function addFilterCondition(): void {
-    filterInputs.value.push('');
+    filterConditions.value.push({ term: '', join: 'and' });
 }
 
 function removeFilterCondition(index: number): void {
-    if (filterInputs.value.length <= 1) {
-        filterInputs.value[0] = '';
+    if (filterConditions.value.length <= 1) {
+        filterConditions.value[0].term = '';
+        filterConditions.value[0].join = 'and';
         return;
     }
-    filterInputs.value.splice(index, 1);
+    filterConditions.value.splice(index, 1);
+}
+
+function matchesFilterConditions(src: string): boolean {
+    const active = activeFilterConditions.value
+        .map((item) => ({ join: item.join, term: normalize(item.term.trim()) }))
+        .filter((item) => item.term);
+    if (active.length === 0) return true;
+    const hay = normalize(src);
+    let result = hay.includes(active[0].term);
+    for (let i = 1; i < active.length; i++) {
+        const item = active[i];
+        const hit = hay.includes(item.term);
+        if (item.join === 'or') result = result || hit;
+        else if (item.join === 'not') result = result && !hit;
+        else result = result && hit;
+    }
+    return result;
 }
 
 /** 时间线：按新到旧 */
@@ -58,30 +82,28 @@ const timelineList = computed<MsgRow[]>(() => {
     const b = bucket.value;
     void b.timelineVersion;
     const arr = b.timeline.snapshot();
-    const terms = filterTerms.value;
-    if (terms.length === 0) return arr.slice().reverse();
+    if (!activeFilterConditions.value.some((item) => item.term.trim())) return arr.slice().reverse();
     const out: MsgRow[] = [];
     for (let i = arr.length - 1; i >= 0; i--) {
         const r = arr[i];
-        if (matchesSearchTerms(r.topic + r.payload, terms, filterLogic.value)) out.push(r);
+        if (matchesFilterConditions(r.topic + r.payload)) out.push(r);
     }
     return out;
 });
 
-type TopicSort = 'insert' | 'recent' | 'name' | 'count';
-const topicSort = ref<TopicSort>('name');
+type TopicSort = 'manual' | 'insert' | 'recent' | 'name' | 'count';
+const topicSort = ref<TopicSort>('manual');
 
 const topicList = computed<TopicView[]>(() => {
     const b = bucket.value;
     void b.topicsVersion;
     const all: TopicView[] = [];
-    const terms = filterTerms.value;
     for (const v of b.topics.values()) {
-        if (terms.length) {
-            let hit = matchesSearchTerms(v.topic, terms, filterLogic.value);
+        if (activeFilterConditions.value.some((item) => item.term.trim())) {
+            let hit = matchesFilterConditions(v.topic);
             if (!hit) {
                 v.buf.forEachReverse((m) => {
-                    if (matchesSearchTerms(m.topic + m.payload, terms, filterLogic.value)) {
+                    if (matchesFilterConditions(m.topic + m.payload)) {
                         hit = true;
                         return false;
                     }
@@ -91,10 +113,19 @@ const topicList = computed<TopicView[]>(() => {
         }
         all.push(v);
     }
+    const orderIndex = new Map<string, number>();
+    b.topicOrder.forEach((topic, index) => orderIndex.set(topic, index));
+    const pinnedWeight = (item: TopicView): number => item.pinned ? 0 : 1;
     switch (topicSort.value) {
+        case 'manual':
+            all.sort((a, b) => pinnedWeight(a) - pinnedWeight(b) || (orderIndex.get(a.topic) ?? Number.MAX_SAFE_INTEGER) - (orderIndex.get(b.topic) ?? Number.MAX_SAFE_INTEGER));
+            break;
+        case 'insert':
+            all.sort((a, b) => pinnedWeight(a) - pinnedWeight(b) || (orderIndex.get(a.topic) ?? Number.MAX_SAFE_INTEGER) - (orderIndex.get(b.topic) ?? Number.MAX_SAFE_INTEGER));
+            break;
         case 'recent': all.sort((a, b) => b.lastTime - a.lastTime); break;
-        case 'name': all.sort((a, b) => a.topic.localeCompare(b.topic)); break;
-        case 'count': all.sort((a, b) => b.total - a.total); break;
+        case 'name': all.sort((a, b) => pinnedWeight(a) - pinnedWeight(b) || a.topic.localeCompare(b.topic)); break;
+        case 'count': all.sort((a, b) => pinnedWeight(a) - pinnedWeight(b) || b.total - a.total); break;
         default: break;
     }
     return all;
@@ -123,12 +154,11 @@ const selectedTopicMessages = computed<MsgRow[]>(() => {
     const v = selectedTopicView.value;
     if (!v) return [];
     const arr = v.buf.snapshot();
-    const terms = filterTerms.value;
-    if (terms.length === 0) return arr.slice().reverse();
+    if (!activeFilterConditions.value.some((item) => item.term.trim())) return arr.slice().reverse();
     const out: MsgRow[] = [];
     for (let i = arr.length - 1; i >= 0; i--) {
         const r = arr[i];
-        if (matchesSearchTerms(r.topic + r.payload, terms, filterLogic.value)) out.push(r);
+        if (matchesFilterConditions(r.topic + r.payload)) out.push(r);
     }
     return out;
 });
@@ -187,6 +217,13 @@ async function toggleDisable(v: TopicView): Promise<void> {
     conn.toggleDisableTopic(cid, v.topic, next);
     if (next) await window.api.mqttDisableTopic({ connectionId: cid, topic: v.topic });
     else await window.api.mqttEnableTopic({ connectionId: cid, topic: v.topic });
+}
+function togglePinTop(topic: string): void {
+    const cid = conn.selectedId;
+    if (!cid) return;
+    const target = bucket.value.topics.get(topic);
+    if (!target) return;
+    msg.setTopicPinned(cid, topic, !target.pinned);
 }
 
 // 滚动容器引用与「跟随新消息」
@@ -270,18 +307,20 @@ onUnmounted(() => window.removeEventListener('click', closeContext));
             <template v-else>
             <div class="filter-row">
                 <div class="filter-builder">
-                    <div class="logic-toggle">
-                        <button class="tgl" :class="{ active: filterLogic === 'and' }" @click="filterLogic = 'and'">且</button>
-                        <button class="tgl" :class="{ active: filterLogic === 'or' }" @click="filterLogic = 'or'">或</button>
-                    </div>
+                    <div class="logic-anchor">过滤</div>
                     <div class="filter-conditions">
-                        <div v-for="(_, index) in filterInputs" :key="index" class="filter-condition">
-                            <span v-if="index > 0" class="logic-label">{{ filterLogic === 'and' ? '且' : '或' }}</span>
-                            <input v-model="filterInputs[index]" placeholder="过滤主题或内容" class="filter-input" />
+                        <div v-for="(item, index) in filterConditions" :key="index" class="filter-condition">
+                            <span v-if="index === 0" class="condition-index">条件 1</span>
+                            <div v-else class="logic-segment" role="tablist" :aria-label="`条件 ${index + 1} 逻辑`">
+                                <button class="seg-btn" :class="{ active: item.join === 'and' }" @click="item.join = 'and'">且</button>
+                                <button class="seg-btn" :class="{ active: item.join === 'or' }" @click="item.join = 'or'">或</button>
+                                <button class="seg-btn" :class="{ active: item.join === 'not' }" @click="item.join = 'not'">非</button>
+                            </div>
+                            <input v-model="item.term" placeholder="过滤主题或内容" class="filter-input" />
                             <button class="condition-btn" title="删除条件" @click="removeFilterCondition(index)">×</button>
                         </div>
-                        <button class="condition-add" title="添加过滤条件" @click="addFilterCondition">+ 条件</button>
                     </div>
+                    <button class="condition-add" title="添加过滤条件" @click="addFilterCondition">+ 条件</button>
                 </div>
                 <button
                     class="follow-btn"
@@ -302,10 +341,10 @@ onUnmounted(() => window.removeEventListener('click', closeContext));
                     >
                         <div class="msg-head">
                             <span class="time">{{ formatTime(m.time) }}</span>
-                            <span class="topic" v-html="highlight(m.topic, activeFilterInputs)"></span>
+                            <span class="topic" v-html="highlight(m.topic, highlightTerms)"></span>
                             <span class="msg-hint">右键格式化</span>
                         </div>
-                        <pre class="msg-body" v-html="highlight(m.payload, activeFilterInputs)"></pre>
+                        <pre class="msg-body" v-html="highlight(m.payload, highlightTerms)"></pre>
                     </div>
                 </div>
             </div>
@@ -315,6 +354,7 @@ onUnmounted(() => window.removeEventListener('click', closeContext));
                     <div class="t-head">
                         <span>主题（{{ topicList.length }}）</span>
                         <select class="sort-select" v-model="topicSort" title="排序方式">
+                            <option value="manual">自定义</option>
                             <option value="name">主题名</option>
                             <option value="insert">首次出现</option>
                             <option value="recent">最近活跃</option>
@@ -328,11 +368,14 @@ onUnmounted(() => window.removeEventListener('click', closeContext));
                                 v-for="t in topicList"
                                 :key="t.topic"
                                 class="t-item"
-                                :class="{ active: bucket.selectedTopic === t.topic, disabled: t.disabled }"
+                                :class="{ active: bucket.selectedTopic === t.topic, disabled: t.disabled, pinned: t.pinned }"
                                 @click="selectTopic(t.topic)"
                                 @contextmenu.prevent="openContext($event, t.topic)"
                             >
-                                <div class="t-name" v-html="highlight(t.topic, activeFilterInputs)"></div>
+                                <div class="t-row">
+                                    <div class="t-name" v-html="highlight(t.topic, highlightTerms)"></div>
+                                    <span v-if="t.pinned" class="pin-badge" title="已置顶">置顶</span>
+                                </div>
                                 <div class="t-meta">
                                     <span class="count">{{ t.total }} 条</span>
                                     <span class="ago">{{ shortTime(t.lastTime) }}</span>
@@ -359,7 +402,7 @@ onUnmounted(() => window.removeEventListener('click', closeContext));
                                     <span class="time">{{ formatTime(m.time) }}</span>
                                     <span class="msg-hint">右键格式化</span>
                                 </div>
-                                <pre class="msg-body" v-html="highlight(m.payload, activeFilterInputs)"></pre>
+                                <pre class="msg-body" v-html="highlight(m.payload, highlightTerms)"></pre>
                             </div>
                         </div>
                     </div>
@@ -375,6 +418,9 @@ onUnmounted(() => window.removeEventListener('click', closeContext));
             </div>
 
             <div v-if="contextMenu.visible" class="ctx" :style="{ left: contextMenu.x + 'px', top: contextMenu.y + 'px' }" @click.stop>
+                <button @click="togglePinTop(contextMenu.topic!); closeContext()">
+                    {{ bucket.topics.get(contextMenu.topic!)?.pinned ? '取消置顶' : '置顶主题' }}
+                </button>
                 <button @click="clearTopic(contextMenu.topic!); closeContext()">清空该主题消息</button>
                 <button @click="toggleDisable(bucket.topics.get(contextMenu.topic!)!); closeContext()">
                     {{ bucket.topics.get(contextMenu.topic!)?.disabled ? '恢复记录' : '禁用记录' }}
@@ -459,34 +505,25 @@ onUnmounted(() => window.removeEventListener('click', closeContext));
 .filter-builder {
     flex: 1;
     min-width: 0;
-    display: flex;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
     gap: 8px;
-    align-items: flex-start;
+    align-items: center;
 }
 
-.logic-toggle {
+.logic-anchor {
+    height: 34px;
     display: inline-flex;
-    flex: 0 0 auto;
-    padding: 2px;
+    align-items: center;
+    justify-content: center;
+    min-width: 58px;
+    padding: 0 10px;
     background: var(--input-bg);
     border: 1px solid var(--border);
     border-radius: 8px;
-
-    .tgl {
-        background: transparent;
-        border: none;
-        color: var(--text-2);
-        font-size: 12px;
-        padding: 5px 9px;
-        border-radius: 6px;
-        cursor: pointer;
-        font-family: inherit;
-
-        &.active {
-            background: rgba(124, 92, 255, 0.28);
-            color: #fff;
-        }
-    }
+    color: var(--text-2);
+    font-size: 12px;
+    font-weight: 700;
 }
 
 .filter-conditions {
@@ -494,28 +531,71 @@ onUnmounted(() => window.removeEventListener('click', closeContext));
     min-width: 0;
     display: flex;
     gap: 6px;
-    align-items: center;
+    align-items: stretch;
     flex-wrap: wrap;
 }
 
 .filter-condition {
-    display: flex;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
     align-items: center;
-    gap: 4px;
-    min-width: 210px;
-    flex: 1 1 240px;
+    gap: 6px;
+    min-width: 240px;
+    max-width: 360px;
+    flex: 1 1 280px;
+    padding: 4px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.02);
 }
 
-.logic-label {
+.condition-index {
     color: var(--text-3);
-    font-size: 12px;
+    font-size: 11px;
+    font-weight: 700;
     white-space: nowrap;
+    padding: 0 8px;
+}
+
+.logic-segment {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px;
+    height: 34px;
+    background: var(--input-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+}
+
+.seg-btn {
+    min-width: 34px;
+    height: 28px;
+    padding: 0 8px;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-2);
+    font-size: 12px;
+    line-height: 28px;
+    font-family: inherit;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+
+    &:hover {
+        color: var(--text-0);
+    }
+
+    &.active {
+        background: rgba(124, 92, 255, 0.28);
+        color: #fff;
+    }
 }
 
 .filter-input {
     flex: 1;
     min-width: 0;
-    padding: 8px 12px;
+    height: 34px;
+    padding: 0 12px;
     background: var(--input-bg);
     border: 1px solid var(--border);
     border-radius: 8px;
@@ -550,6 +630,13 @@ onUnmounted(() => window.removeEventListener('click', closeContext));
 
 .condition-add {
     padding: 0 10px;
+}
+
+@media (max-width: 900px) {
+    .filter-builder {
+        grid-template-columns: 1fr;
+        align-items: stretch;
+    }
 }
 
 .follow-btn {
@@ -696,7 +783,17 @@ onUnmounted(() => window.removeEventListener('click', closeContext));
     &.disabled {
         opacity: 0.5;
     }
+    &.pinned {
+        box-shadow: inset 0 0 0 1px rgba(245, 158, 11, 0.28);
+    }
+    .t-row {
+        display: flex;
+        align-items: flex-start;
+        gap: 8px;
+    }
     .t-name {
+        flex: 1;
+        min-width: 0;
         font-size: var(--fs-msg-topic);
         font-family: 'JetBrains Mono', Consolas, monospace;
         color: var(--text-0);
@@ -704,6 +801,16 @@ onUnmounted(() => window.removeEventListener('click', closeContext));
         word-break: break-all;
         user-select: text;
         cursor: text;
+    }
+    .pin-badge {
+        flex: 0 0 auto;
+        padding: 1px 6px;
+        border-radius: 999px;
+        background: rgba(245, 158, 11, 0.16);
+        color: #fcd34d;
+        font-size: 10px;
+        font-weight: 700;
+        line-height: 1.6;
     }
     .t-meta {
         display: flex;

@@ -21,6 +21,7 @@ export interface TopicView {
     lastTime: number;
     lastSeq: number;
     disabled: boolean;
+    pinned: boolean;
     normTopic: string;
 }
 
@@ -42,6 +43,7 @@ export interface MsgBucket {
     timelineVersion: number;
     topics: Map<string, TopicView>;
     topicsVersion: number;
+    topicOrder: string[];
     selectedTopic: string | null;
     paused: boolean;
     receiveCount: number;
@@ -64,6 +66,7 @@ export const useMessageStore = defineStore('messages', () => {
             timelineVersion: 0,
             topics: markRaw(new Map<string, TopicView>()),
             topicsVersion: 0,
+            topicOrder: [],
             selectedTopic: null,
             paused: false,
             receiveCount: 0,
@@ -109,9 +112,11 @@ export const useMessageStore = defineStore('messages', () => {
                 lastTime: 0,
                 lastSeq: 0,
                 disabled: false,
+                pinned: false,
                 normTopic: topic.toLowerCase().replace(/\s+/gu, '')
             });
             b.topics.set(topic, v);
+            b.topicOrder.push(topic);
             b.topicsVersion++;
         }
         return v;
@@ -145,10 +150,12 @@ export const useMessageStore = defineStore('messages', () => {
                     lastTime: m.time,
                     lastSeq: row.seq,
                     disabled: false,
+                    pinned: false,
                     normTopic: m.topic.toLowerCase().replace(/\s+/gu, '')
                 });
                 nv.buf.push(row);
                 b.topics.set(m.topic, nv);
+                b.topicOrder.push(m.topic);
             }
         }
         b.receiveCount += batch.length;
@@ -161,6 +168,7 @@ export const useMessageStore = defineStore('messages', () => {
         if (!b) return;
         b.timeline.clear();
         b.topics.clear();
+        b.topicOrder = [];
         b.timelineVersion++;
         b.topicsVersion++;
         b.receiveCount = 0;
@@ -181,6 +189,7 @@ export const useMessageStore = defineStore('messages', () => {
         const b = buckets.get(connectionId);
         if (!b) return;
         if (b.topics.delete(topic)) b.topicsVersion++;
+        b.topicOrder = b.topicOrder.filter((item) => item !== topic);
         if (b.selectedTopic === topic) b.selectedTopic = null;
     }
 
@@ -194,6 +203,32 @@ export const useMessageStore = defineStore('messages', () => {
         if (!b) return;
         const v = b.topics.get(topic);
         if (v) { v.disabled = disabled; b.topicsVersion++; }
+    }
+
+    function reorderTopic(connectionId: string, topic: string, targetTopic: string): void {
+        const b = buckets.get(connectionId);
+        if (!b || topic === targetTopic) return;
+        const fromIndex = b.topicOrder.indexOf(topic);
+        const toIndex = b.topicOrder.indexOf(targetTopic);
+        if (fromIndex < 0 || toIndex < 0) return;
+        const next = b.topicOrder.slice();
+        next.splice(fromIndex, 1);
+        next.splice(toIndex, 0, topic);
+        b.topicOrder = next;
+        b.topicsVersion++;
+    }
+
+    function setTopicPinned(connectionId: string, topic: string, pinned: boolean): void {
+        const b = buckets.get(connectionId);
+        if (!b) return;
+        const v = b.topics.get(topic);
+        if (!v) return;
+        v.pinned = pinned;
+        const next = b.topicOrder.filter((item) => item !== topic);
+        if (pinned) next.unshift(topic);
+        else next.push(topic);
+        b.topicOrder = next;
+        b.topicsVersion++;
     }
 
     function pushPublishHistory(connectionId: string, item: PublishHistoryItem): void {
@@ -289,6 +324,8 @@ export const useMessageStore = defineStore('messages', () => {
         removeTopic,
         selectTopic,
         setTopicDisabled,
+        reorderTopic,
+        setTopicPinned,
         pushPublishHistory,
         replacePublishHistory,
         setPaused,

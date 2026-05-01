@@ -8,12 +8,14 @@ export interface ReplayRunOptions {
     connectionId: string;
     rows: ReplayMessage[];
     speed: ReplaySpeed;
+    loop?: boolean;
     /** 将每条 JSON payload 内形似 Unix 时间的数字改为当前时间（毫秒或秒） */
     timestampRewrite?: ReplayTimestampRewrite;
 }
 
 interface ReplayState {
     running: boolean;
+    paused: boolean;
     connectionId: string | null;
     sourceName: string;
     total: number;
@@ -22,10 +24,16 @@ interface ReplayState {
     startedAt: number;
     lastError: string;
     stopRequested: boolean;
+    loopEnabled: boolean;
+    rounds: number;
+    currentIndex: number;
+    currentTopic: string;
+    currentTime: number;
 }
 
 const state = reactive<ReplayState>({
     running: false,
+    paused: false,
     connectionId: null,
     sourceName: '',
     total: 0,
@@ -33,7 +41,12 @@ const state = reactive<ReplayState>({
     failed: 0,
     startedAt: 0,
     lastError: '',
-    stopRequested: false
+    stopRequested: false,
+    loopEnabled: false,
+    rounds: 0,
+    currentIndex: -1,
+    currentTopic: '',
+    currentTime: 0
 });
 
 const speedMap: Record<ReplaySpeed, number> = {
@@ -48,12 +61,25 @@ function sleep(ms: number): Promise<void> {
     return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
+async function waitIfPaused(): Promise<void> {
+    while (state.paused && !state.stopRequested) {
+        await sleep(120);
+    }
+}
+
 async function waitForDelta(prev: ReplayMessage, next: ReplayMessage, speed: ReplaySpeed): Promise<void> {
     const factor = speedMap[speed];
     if (factor <= 0) return;
     const delta = Math.max(0, next.time - prev.time);
     if (delta <= 0) return;
-    await sleep(Math.min(60_000, Math.round(delta / factor)));
+    let remaining = Math.min(60_000, Math.round(delta / factor));
+    while (remaining > 0 && !state.stopRequested) {
+        await waitIfPaused();
+        if (state.stopRequested) return;
+        const chunk = Math.min(remaining, 200);
+        await sleep(chunk);
+        remaining -= chunk;
+    }
 }
 
 export function useMqttReplay() {
@@ -64,6 +90,7 @@ export function useMqttReplay() {
         if (!options.rows.length) throw new Error('没有可回放的数据');
 
         state.running = true;
+        state.paused = false;
         state.connectionId = options.connectionId;
         state.sourceName = sourceName;
         state.total = options.rows.length;
@@ -72,31 +99,46 @@ export function useMqttReplay() {
         state.startedAt = Date.now();
         state.lastError = '';
         state.stopRequested = false;
+        state.loopEnabled = !!options.loop;
+        state.rounds = 0;
+        state.currentIndex = -1;
+        state.currentTopic = '';
+        state.currentTime = 0;
 
         try {
-            for (let i = 0; i < options.rows.length; i++) {
-                if (state.stopRequested) break;
-                const row = options.rows[i];
-                if (i > 0) {
-                    await waitForDelta(options.rows[i - 1], row, options.speed);
+            do {
+                state.rounds++;
+                for (let i = 0; i < options.rows.length; i++) {
                     if (state.stopRequested) break;
+                    await waitIfPaused();
+                    if (state.stopRequested) break;
+                    const row = options.rows[i];
+                    state.currentIndex = i;
+                    state.currentTopic = row.topic;
+                    state.currentTime = row.time;
+                    if (i > 0) {
+                        await waitForDelta(options.rows[i - 1], row, options.speed);
+                        if (state.stopRequested) break;
+                        await waitIfPaused();
+                        if (state.stopRequested) break;
+                    }
+                    const tw = options.timestampRewrite ?? 'off';
+                    const payload = rewriteReplayPayloadTimestamps(row.payload, tw);
+                    const result = await window.api.mqttPublish({
+                        connectionId: options.connectionId,
+                        topic: row.topic,
+                        payload,
+                        qos: row.qos,
+                        retain: row.retain
+                    });
+                    if (result.success) {
+                        state.sent++;
+                    } else {
+                        state.failed++;
+                        state.lastError = result.message || '发布失败';
+                    }
                 }
-                const tw = options.timestampRewrite ?? 'off';
-                const payload = rewriteReplayPayloadTimestamps(row.payload, tw);
-                const result = await window.api.mqttPublish({
-                    connectionId: options.connectionId,
-                    topic: row.topic,
-                    payload,
-                    qos: row.qos,
-                    retain: row.retain
-                });
-                if (result.success) {
-                    state.sent++;
-                } else {
-                    state.failed++;
-                    state.lastError = result.message || '发布失败';
-                }
-            }
+            } while (options.loop && !state.stopRequested);
 
             if (state.stopRequested) {
                 toast.info(`已停止回放：${state.sent}/${state.total}`);
@@ -107,7 +149,11 @@ export function useMqttReplay() {
             }
         } finally {
             state.running = false;
+            state.paused = false;
             state.stopRequested = false;
+            state.currentIndex = -1;
+            state.currentTopic = '';
+            state.currentTime = 0;
         }
     }
 
@@ -116,9 +162,15 @@ export function useMqttReplay() {
         state.stopRequested = true;
     }
 
+    function togglePause(): void {
+        if (!state.running) return;
+        state.paused = !state.paused;
+    }
+
     return {
         state: readonly(state),
         start,
-        stop
+        stop,
+        togglePause
     };
 }

@@ -10,6 +10,8 @@ export interface FormatViewerState {
     draftRaw: string;
     publishable: boolean;
     history: FormatViewerHistoryItem[];
+    connectionId: string | null;
+    publishTracking: FormatViewerPublishTracking | null;
 }
 
 export interface FormatViewerHistoryItem {
@@ -27,6 +29,11 @@ export interface FormatViewerDraft {
     retain?: boolean;
 }
 
+export interface FormatViewerPublishTracking {
+    connectionId: string;
+    sinceTime: number;
+}
+
 const state = reactive<FormatViewerState>({
     visible: false,
     topic: '',
@@ -36,7 +43,9 @@ const state = reactive<FormatViewerState>({
     draftTopic: '',
     draftRaw: '',
     publishable: false,
-    history: []
+    history: [],
+    connectionId: null,
+    publishTracking: null
 });
 
 let applyHandler: ((draft: FormatViewerDraft) => void) | null = null;
@@ -51,6 +60,7 @@ export function useFormatViewer() {
         editable?: boolean;
         publishable?: boolean;
         history?: FormatViewerHistoryItem[];
+        connectionId?: string | null;
         onApply?: (draft: FormatViewerDraft) => void;
         onPublish?: (draft: FormatViewerDraft) => void | Promise<void>;
     }): void {
@@ -63,6 +73,8 @@ export function useFormatViewer() {
         state.draftRaw = raw;
         state.publishable = !!payload.publishable;
         state.history = payload.history ?? [];
+        state.connectionId = payload.connectionId ?? null;
+        state.publishTracking = null;
         applyHandler = payload.onApply ?? null;
         publishHandler = payload.onPublish ?? null;
         state.visible = true;
@@ -75,6 +87,8 @@ export function useFormatViewer() {
         state.draftRaw = '';
         state.publishable = false;
         state.history = [];
+        state.connectionId = null;
+        state.publishTracking = null;
         applyHandler = null;
         publishHandler = null;
     }
@@ -89,15 +103,20 @@ export function useFormatViewer() {
         applyDraft();
         await publishHandler?.(draft);
     }
+    function markPublished(tracking: FormatViewerPublishTracking): void {
+        state.connectionId = tracking.connectionId;
+        state.publishTracking = tracking;
+    }
     function repeatHistory(item: FormatViewerHistoryItem): void {
         state.draftTopic = item.topic;
         state.draftRaw = item.payload;
         state.topic = item.topic;
         state.raw = item.payload;
         state.time = item.time;
+        state.publishTracking = null;
         applyHandler?.({ topic: item.topic, raw: item.payload, qos: item.qos, retain: item.retain });
     }
-    return { state, open, close, applyDraft, publishDraft, repeatHistory };
+    return { state, open, close, applyDraft, publishDraft, markPublished, repeatHistory };
 }
 
 function formatJsonText(raw: string): string {

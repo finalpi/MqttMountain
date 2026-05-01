@@ -1,6 +1,6 @@
 ﻿
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue';
+import { computed, onMounted, ref, watch } from 'vue';
 import { useConnectionStore } from '@/stores/connection';
 import { useToast } from '@/composables/useToast';
 import { useFormatViewer } from '@/composables/useFormatViewer';
@@ -9,25 +9,32 @@ import type { HistoryMessage } from '@shared/types';
 import { datetimeLocalToTs, formatTime, shortTime, tsToDatetimeLocal } from '@/utils/format';
 import { exportMqttxJson, exportGroupedZip } from '@/utils/exporter';
 import { parseReplayFile, replayRowsFromHistory, type ReplayMessage } from '@/utils/replay';
-import { highlight, type SearchLogic } from '@/utils/filter';
+import { highlight, normalize, type SearchLogic } from '@/utils/filter';
 
 const formatViewer = useFormatViewer();
 const replay = useMqttReplay();
 const conn = useConnectionStore();
 const toast = useToast();
 
+type KeywordJoin = SearchLogic | 'not';
+interface KeywordCondition {
+    term: string;
+    join: KeywordJoin;
+}
+
 const startTime = ref<string>('');
 const endTime = ref<string>('');
-const keywordInputs = ref<string[]>(['']);
-const keywordLogic = ref<SearchLogic>('and');
+const keywordConditions = ref<KeywordCondition[]>([{ term: '', join: 'and' }]);
 const scope = ref<'current' | 'all'>('current');
 const rows = ref<HistoryMessage[]>([]);
+const dataSource = ref<'history' | 'imported'>('history');
 const selectedTopic = ref<string | null>(null);
 const loading = ref(false);
 
 const replayQos = ref<0 | 1 | 2>(0);
 const replayRetain = ref(false);
-const replaySpeed = ref<ReplaySpeed>('10x');
+const replaySpeed = ref<ReplaySpeed>('1x');
+const replayLoop = ref(false);
 const replayRewriteTimestamps = ref(false);
 const importedRows = ref<ReplayMessage[]>([]);
 const importedName = ref('');
@@ -43,6 +50,22 @@ interface TopicGroup {
 }
 
 const canReplayToMqtt = computed(() => Boolean(conn.selectedId) && conn.selectedState === 'connected');
+const replaySourceRows = ref<HistoryMessage[]>([]);
+const importedHistoryRows = computed<HistoryMessage[]>(() => importedRows.value.map((row) => ({
+    connectionId: conn.selectedId || 'imported',
+    topic: row.topic,
+    payload: row.payload,
+    time: row.time
+})));
+const replayPreviewRows = computed<HistoryMessage[]>(() => {
+    if (!replay.state.running || replaySourceRows.value.length === 0) return [];
+    const end = replay.state.currentIndex >= 0 ? Math.min(replay.state.currentIndex + 1, replaySourceRows.value.length) : 0;
+    return replaySourceRows.value.slice(0, end);
+});
+const displayRows = computed<HistoryMessage[]>(() => {
+    if (replay.state.running) return replayPreviewRows.value;
+    return dataSource.value === 'imported' ? importedHistoryRows.value : rows.value;
+});
 const replayHint = computed(() => {
     if (!conn.selectedId) return '请先选择一个目标连接';
     if (conn.selectedState !== 'connected') return '目标连接需要处于已连接状态';
@@ -51,7 +74,7 @@ const replayHint = computed(() => {
 
 const grouped = computed<TopicGroup[]>(() => {
     const m = new Map<string, { items: HistoryMessage[]; lastTime: number }>();
-    for (const r of rows.value) {
+    for (const r of displayRows.value) {
         let g = m.get(r.topic);
         if (!g) {
             g = { items: [], lastTime: 0 };
@@ -73,27 +96,47 @@ const grouped = computed<TopicGroup[]>(() => {
 
 const detail = computed<HistoryMessage[]>(() => {
     if (!selectedTopic.value) return [];
-    return rows.value.filter((r) => r.topic === selectedTopic.value);
+    const matched = displayRows.value.filter((r) => r.topic === selectedTopic.value);
+    return replay.state.running ? matched.slice().reverse() : matched;
 });
+const visibleCountLabel = computed(() => displayRows.value.length);
+const dataSourceLabel = computed(() => {
+    if (replay.state.running) return `回放预览：${replay.state.sourceName}`;
+    return dataSource.value === 'imported' ? `导入数据：${importedName.value || '未命名文件'}` : '历史查询结果';
+});
+
+function matchesKeywordConditions(row: HistoryMessage): boolean {
+    const active = keywordConditions.value
+        .map((item) => ({ join: item.join, term: normalize(item.term.trim()) }))
+        .filter((item) => item.term);
+    if (active.length === 0) return true;
+    const hay = normalize(row.topic + row.payload);
+    let result = hay.includes(active[0].term);
+    for (let i = 1; i < active.length; i++) {
+        const item = active[i];
+        const hit = hay.includes(item.term);
+        if (item.join === 'or') result = result || hit;
+        else if (item.join === 'not') result = result && !hit;
+        else result = result && hit;
+    }
+    return result;
+}
 
 async function query(): Promise<void> {
     const st = datetimeLocalToTs(startTime.value);
     const et = datetimeLocalToTs(endTime.value);
-    const keywords = keywordInputs.value.map((v) => v.trim()).filter(Boolean);
     loading.value = true;
     const r = await window.api.historyQuery({
         connectionId: scope.value === 'current' ? conn.selectedId : null,
         startTime: st || undefined,
         endTime: et || undefined,
-        keyword: keywords[0] || undefined,
-        keywords: keywords.length ? keywords : undefined,
-        keywordLogic: keywordLogic.value,
         limit: 500_000
     });
     loading.value = false;
     if (r.success && r.data) {
-        rows.value = r.data;
-        selectedTopic.value = r.data.length > 0 ? r.data[0].topic : null;
+        rows.value = r.data.filter(matchesKeywordConditions);
+        dataSource.value = 'history';
+        selectedTopic.value = rows.value.length > 0 ? rows.value[0].topic : null;
         if (rows.value.length === 0) toast.info('无匹配结果');
         else toast.success(`找到 ${rows.value.length} 条`);
     } else {
@@ -102,15 +145,16 @@ async function query(): Promise<void> {
 }
 
 function addKeywordCondition(): void {
-    keywordInputs.value.push('');
+    keywordConditions.value.push({ term: '', join: 'and' });
 }
 
 function removeKeywordCondition(index: number): void {
-    if (keywordInputs.value.length <= 1) {
-        keywordInputs.value[0] = '';
+    if (keywordConditions.value.length <= 1) {
+        keywordConditions.value[0].term = '';
+        keywordConditions.value[0].join = 'and';
         return;
     }
-    keywordInputs.value.splice(index, 1);
+    keywordConditions.value.splice(index, 1);
 }
 
 let appStart = 0;
@@ -179,14 +223,14 @@ function pickQuick(q: Quick): void {
 }
 
 async function exportJson(): Promise<void> {
-    if (!rows.value.length) { toast.warning('没有结果可导出'); return; }
-    exportMqttxJson(rows.value, `history-${Date.now()}.json`);
-    toast.success(`已导出 ${rows.value.length} 条`);
+    if (!displayRows.value.length) { toast.warning('没有结果可导出'); return; }
+    exportMqttxJson(displayRows.value, `history-${Date.now()}.json`);
+    toast.success(`已导出 ${displayRows.value.length} 条`);
 }
 async function exportZip(): Promise<void> {
-    if (!rows.value.length) { toast.warning('没有结果可导出'); return; }
-    await exportGroupedZip(rows.value, `history-grouped-${Date.now()}.zip`);
-    toast.success(`已导出 ${rows.value.length} 条`);
+    if (!displayRows.value.length) { toast.warning('没有结果可导出'); return; }
+    await exportGroupedZip(displayRows.value, `history-grouped-${Date.now()}.zip`);
+    toast.success(`已导出 ${displayRows.value.length} 条`);
 }
 
 async function startReplayRows(sourceName: string, replayRows: ReplayMessage[]): Promise<void> {
@@ -203,10 +247,18 @@ async function startReplayRows(sourceName: string, replayRows: ReplayMessage[]):
         return;
     }
     try {
+        replaySourceRows.value = replayRows.map((row) => ({
+            connectionId: conn.selectedId || 'replay',
+            topic: row.topic,
+            payload: row.payload,
+            time: row.time
+        }));
+        selectedTopic.value = replaySourceRows.value[0]?.topic ?? null;
         await replay.start(sourceName, {
             connectionId: conn.selectedId,
             rows: replayRows,
             speed: replaySpeed.value,
+            loop: replayLoop.value,
             timestampRewrite: replayRewriteTimestamps.value ? 'on' : 'off'
         });
     } catch (error) {
@@ -229,6 +281,8 @@ async function onImportChange(event: Event): Promise<void> {
     try {
         importedRows.value = await parseReplayFile(file);
         importedName.value = file.name;
+        dataSource.value = 'imported';
+        selectedTopic.value = importedHistoryRows.value[0]?.topic ?? null;
         toast.success(`已导入 ${importedRows.value.length} 条回放数据`);
     } catch (error) {
         importedRows.value = [];
@@ -243,7 +297,25 @@ async function replayImportedRows(): Promise<void> {
     await startReplayRows(importedName.value || '导入文件', importedRows.value);
 }
 
+async function replayPreferredRows(): Promise<void> {
+    if (dataSource.value === 'imported' && importedRows.value.length) {
+        await replayImportedRows();
+        return;
+    }
+    await replayHistoryRows();
+}
+
 onMounted(init);
+
+watch(
+    () => replay.state.running,
+    (running) => {
+        if (running) return;
+        replaySourceRows.value = [];
+        const sourceRows = dataSource.value === 'imported' ? importedHistoryRows.value : rows.value;
+        selectedTopic.value = sourceRows[0]?.topic ?? null;
+    }
+);
 </script>
 
 <template>
@@ -251,49 +323,53 @@ onMounted(init);
         <div class="panel-head">
             <h2>历史查询</h2>
             <span class="spacer"></span>
-            <button v-if="rows.length" class="btn btn-mini" @click="exportJson" title="导出完整 JSON">导出 JSON</button>
-            <button v-if="rows.length" class="btn btn-mini" @click="exportZip" title="按主题分组 ZIP">导出 ZIP</button>
+            <button v-if="displayRows.length" class="btn btn-mini" @click="exportJson" title="导出完整 JSON">导出 JSON</button>
+            <button v-if="displayRows.length" class="btn btn-mini" @click="exportZip" title="按主题分组 ZIP">导出 ZIP</button>
         </div>
         <div class="panel-body">
             <div class="controls">
-                <div class="field">
-                    <label>开始时间</label>
-                    <input type="datetime-local" step="1" v-model="startTime" @input="activeQuick = ''" @keydown.enter="query" />
-                </div>
-                <div class="field">
-                    <label>结束时间</label>
-                    <div class="inline">
-                        <input type="datetime-local" step="1" v-model="endTime" @input="activeQuick = ''" @keydown.enter="query" />
-                        <button class="btn btn-mini" @click="setEndNow(); activeQuick = ''">当前</button>
+                <div class="controls-main">
+                    <div class="field">
+                        <label>开始时间</label>
+                        <input type="datetime-local" step="1" v-model="startTime" @input="activeQuick = ''" @keydown.enter="query" />
                     </div>
+                    <div class="field">
+                        <label>结束时间</label>
+                        <div class="inline">
+                            <input type="datetime-local" step="1" v-model="endTime" @input="activeQuick = ''" @keydown.enter="query" />
+                            <button class="btn btn-mini" @click="setEndNow(); activeQuick = ''">当前</button>
+                        </div>
+                    </div>
+                    <div class="field">
+                        <label>连接范围</label>
+                        <select v-model="scope" @keydown.enter="query">
+                            <option value="current">当前连接</option>
+                            <option value="all">全部连接</option>
+                        </select>
+                    </div>
+                    <button class="btn btn-primary query-btn" :disabled="loading" @click="query">
+                        {{ loading ? '查询中...' : '查询' }}
+                    </button>
                 </div>
                 <div class="field keyword-field">
                     <label>关键字</label>
                     <div class="filter-builder">
-                        <div class="logic-toggle">
-                            <button class="tgl" :class="{ active: keywordLogic === 'and' }" @click="keywordLogic = 'and'">且</button>
-                            <button class="tgl" :class="{ active: keywordLogic === 'or' }" @click="keywordLogic = 'or'">或</button>
-                        </div>
+                        <div class="logic-anchor">条件</div>
                         <div class="filter-conditions">
-                            <div v-for="(_, index) in keywordInputs" :key="index" class="filter-condition">
-                                <span v-if="index > 0" class="logic-label">{{ keywordLogic === 'and' ? '且' : '或' }}</span>
-                                <input v-model="keywordInputs[index]" placeholder="主题或内容" @keydown.enter="query" />
-                                <button class="condition-btn" title="删除条件" @click="removeKeywordCondition(index)">x</button>
+                            <div v-for="(item, index) in keywordConditions" :key="index" class="filter-condition">
+                                <span v-if="index === 0" class="condition-index">条件 1</span>
+                                <div v-else class="logic-segment" role="tablist" :aria-label="`条件 ${index + 1} 逻辑`">
+                                    <button class="seg-btn" :class="{ active: item.join === 'and' }" @click="item.join = 'and'">且</button>
+                                    <button class="seg-btn" :class="{ active: item.join === 'or' }" @click="item.join = 'or'">或</button>
+                                    <button class="seg-btn" :class="{ active: item.join === 'not' }" @click="item.join = 'not'">非</button>
+                                </div>
+                                <input v-model="item.term" placeholder="主题或内容" @keydown.enter="query" />
+                                <button class="condition-btn" title="删除条件" @click="removeKeywordCondition(index)">×</button>
                             </div>
-                            <button class="condition-add" title="添加过滤条件" @click="addKeywordCondition">+ 条件</button>
                         </div>
+                        <button class="condition-add" title="添加过滤条件" @click="addKeywordCondition">+ 添加条件</button>
                     </div>
                 </div>
-                <div class="field">
-                    <label>连接范围</label>
-                    <select v-model="scope" @keydown.enter="query">
-                        <option value="current">当前连接</option>
-                        <option value="all">全部连接</option>
-                    </select>
-                </div>
-                <button class="btn btn-primary query-btn" :disabled="loading" @click="query">
-                    {{ loading ? '查询中...' : '查询' }}
-                </button>
             </div>
             <div class="quick-bar">
                 <span class="quick-label">快速选择</span>
@@ -311,7 +387,7 @@ onMounted(init);
                     <strong>真实 MQTT 重放</strong>
                     <span class="replay-hint">{{ replayHint }}</span>
                 </div>
-                <div class="replay-controls">
+                <div class="replay-grid">
                     <div class="field small">
                         <label>QoS</label>
                         <select v-model.number="replayQos">
@@ -337,33 +413,56 @@ onMounted(init);
                             <option value="1x">1x</option>
                         </select>
                     </div>
-                    <div
-                        class="replay-switch-row"
-                        title="仅对合法 JSON：毫秒级(≥1e12)→当前毫秒；秒级(1e9~1e12)→当前秒"
-                    >
-                        <span class="replay-switch-label">时间戳→当前</span>
-                        <label class="switch" :title="replayRewriteTimestamps ? '已开启' : '已关闭'">
-                            <input v-model="replayRewriteTimestamps" type="checkbox" />
-                            <span class="slider" :class="{ on: replayRewriteTimestamps }"></span>
-                        </label>
+                    <div class="replay-toggle-group">
+                        <div
+                            class="replay-switch-row"
+                        >
+                            <span class="replay-switch-label">
+                                时间戳→当前
+                                <span
+                                    class="help-dot"
+                                    title="仅对合法 JSON 生效：把 payload 里像 Unix 时间戳的数字改成发送当下的时间。毫秒级(≥1e12)改为当前毫秒，秒级(1e9~1e12)改为当前秒。"
+                                >?</span>
+                            </span>
+                            <label class="switch" :title="replayRewriteTimestamps ? '已开启' : '已关闭'">
+                                <input v-model="replayRewriteTimestamps" type="checkbox" />
+                                <span class="slider" :class="{ on: replayRewriteTimestamps }"></span>
+                            </label>
+                        </div>
+                        <div class="replay-switch-row" title="到最后一条后重新从头开始，直到手动停止">
+                            <span class="replay-switch-label">循环播放</span>
+                            <label class="switch" :title="replayLoop ? '已开启' : '已关闭'">
+                                <input v-model="replayLoop" type="checkbox" />
+                                <span class="slider" :class="{ on: replayLoop }"></span>
+                            </label>
+                        </div>
                     </div>
-                    <button class="btn" :disabled="!rows.length || !canReplayToMqtt || replay.state.running" @click="replayHistoryRows">重放查询结果</button>
-                    <button class="btn" :disabled="replay.state.running" @click="openImport">导入文件</button>
-                    <button class="btn" :disabled="!importedRows.length || !canReplayToMqtt || replay.state.running" @click="replayImportedRows">重放导入数据</button>
-                    <button class="btn btn-danger" :disabled="!replay.state.running" @click="replay.stop()">停止</button>
+                    <div class="replay-actions">
+                        <button class="btn" :disabled="replay.state.running" @click="openImport">导入文件</button>
+                        <button
+                            class="btn btn-primary replay-start"
+                            :disabled="(!rows.length && !importedRows.length) || !canReplayToMqtt || replay.state.running"
+                            @click="replayPreferredRows"
+                        >开始重放</button>
+                        <button class="btn btn-warning" :disabled="!replay.state.running" @click="replay.togglePause()">
+                            {{ replay.state.paused ? '继续' : '暂停' }}
+                        </button>
+                        <button class="btn btn-danger" :disabled="!replay.state.running" @click="replay.stop()">停止</button>
+                    </div>
                     <input ref="fileInput" type="file" accept=".json,.jsonl,.zip" class="hidden-file" @change="onImportChange" />
                 </div>
                 <div class="replay-meta">
-                    <span v-if="importedRows.length">已导入：{{ importedName }} / {{ importedRows.length }} 条</span>
-                    <span v-if="replay.state.running">运行中：{{ replay.state.sent }}/{{ replay.state.total }}，失败 {{ replay.state.failed }}</span>
-                    <span v-else-if="replay.state.total">上次任务：{{ replay.state.sourceName }}，成功 {{ replay.state.sent }} / {{ replay.state.total }}</span>
+                    <span>{{ dataSourceLabel }} / {{ visibleCountLabel }} 条</span>
+                    <span v-if="replay.state.paused" class="replay-paused">已暂停</span>
+                    <span v-if="replay.state.running">运行中：第 {{ replay.state.rounds }} 轮，已发送 {{ replay.state.sent }} 条，本轮总数 {{ replay.state.total }}，失败 {{ replay.state.failed }}</span>
+                    <span v-else-if="replay.state.total">上次任务：{{ replay.state.sourceName }}，共发送 {{ replay.state.sent }} 条，本轮基数 {{ replay.state.total }}</span>
                     <span v-if="replay.state.lastError" class="replay-error">最近错误：{{ replay.state.lastError }}</span>
                 </div>
             </div>
 
-            <div v-if="rows.length === 0" class="empty">
+            <div v-if="displayRows.length === 0" class="empty">
                 <div v-if="loading">查询中，请稍候...</div>
-                <div v-else>设置时间范围和关键字后点击“查询”</div>
+                <div v-else>设置时间范围和关键字后点击“查询”，或导入回放文件</div>
             </div>
 
             <div v-else class="split">
@@ -385,7 +484,7 @@ onMounted(init);
                                 :class="{ active: selectedTopic === g.topic }"
                                 @click="selectedTopic = g.topic"
                             >
-                                <div class="t-name" v-html="highlight(g.topic, keywordInputs)"></div>
+                                <div class="t-name" v-html="highlight(g.topic, keywordConditions.map((item) => item.term))"></div>
                                 <div class="t-meta">
                                     <span class="count">{{ g.items.length }} 条</span>
                                     <span class="ago">{{ shortTime(g.lastTime) }}</span>
@@ -408,7 +507,7 @@ onMounted(init);
                         <div v-else class="msg-list">
                             <div
                                 v-for="m in detail"
-                                :key="m.time + '|' + m.payload.length"
+                                :key="m.topic + '|' + m.time + '|' + m.payload.length"
                                 class="msg-card cv-auto"
                                 @contextmenu.prevent="formatViewer.open({ topic: m.topic, time: m.time, raw: m.payload })"
                             >
@@ -416,7 +515,7 @@ onMounted(init);
                                     <span class="time">{{ formatTime(m.time) }}</span>
                                     <span class="msg-hint">右键格式化</span>
                                 </div>
-                                <pre class="msg-body" v-html="highlight(m.payload, keywordInputs)"></pre>
+                                <pre class="msg-body" v-html="highlight(m.payload, keywordConditions.map((item) => item.term))"></pre>
                             </div>
                         </div>
                     </div>
@@ -432,11 +531,17 @@ onMounted(init);
 }
 
 .controls {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding-bottom: 6px;
+}
+
+.controls-main {
     display: grid;
-    grid-template-columns: repeat(4, minmax(150px, 1fr)) auto;
+    grid-template-columns: minmax(220px, 1fr) minmax(220px, 1fr) minmax(140px, 180px) auto;
     gap: 8px;
     align-items: end;
-    padding-bottom: 6px;
 
     .inline {
         display: flex;
@@ -455,39 +560,30 @@ onMounted(init);
     }
 
     .keyword-field {
-        grid-column: span 2;
+        min-width: 0;
     }
 }
 
 .filter-builder {
-    display: flex;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
     gap: 8px;
-    align-items: flex-start;
+    align-items: center;
 }
 
-.logic-toggle {
+.logic-anchor {
+    height: 34px;
     display: inline-flex;
-    flex: 0 0 auto;
-    padding: 2px;
+    align-items: center;
+    justify-content: center;
+    min-width: 58px;
+    padding: 0 10px;
     background: var(--input-bg);
     border: 1px solid var(--border);
     border-radius: 8px;
-
-    .tgl {
-        background: transparent;
-        border: none;
-        color: var(--text-2);
-        font-size: 12px;
-        padding: 5px 9px;
-        border-radius: 6px;
-        cursor: pointer;
-        font-family: inherit;
-
-        &.active {
-            background: rgba(124, 92, 255, 0.28);
-            color: #fff;
-        }
-    }
+    color: var(--text-2);
+    font-size: 12px;
+    font-weight: 700;
 }
 
 .filter-conditions {
@@ -495,25 +591,73 @@ onMounted(init);
     min-width: 0;
     display: flex;
     gap: 6px;
-    align-items: center;
+    align-items: stretch;
     flex-wrap: wrap;
 }
 
 .filter-condition {
-    display: flex;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
     align-items: center;
-    gap: 4px;
-    min-width: 210px;
-    flex: 1 1 240px;
+    gap: 6px;
+    min-width: 240px;
+    max-width: 360px;
+    flex: 1 1 280px;
+    padding: 4px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.02);
 
     input {
         min-width: 0;
     }
 }
-.logic-label {
+
+.condition-index {
     color: var(--text-3);
-    font-size: 12px;
+    font-size: 11px;
+    font-weight: 700;
     white-space: nowrap;
+    padding: 0 8px;
+}
+
+.logic-segment {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px;
+    height: 34px;
+    background: var(--input-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+}
+
+.seg-btn {
+    min-width: 34px;
+    height: 28px;
+    padding: 0 8px;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-2);
+    font-size: 12px;
+    line-height: 28px;
+    font-family: inherit;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+
+    &:hover {
+        color: var(--text-0);
+    }
+
+    &.active {
+        background: rgba(124, 92, 255, 0.28);
+        color: #fff;
+    }
+}
+
+.filter-condition input {
+    height: 34px;
+    padding: 0 12px;
 }
 
 .condition-btn,
@@ -539,14 +683,30 @@ onMounted(init);
 
 .condition-add {
     padding: 0 10px;
+    align-self: start;
 }
 
 @media (max-width: 1200px) {
-    .controls {
-        grid-template-columns: repeat(2, 1fr);
+    .controls-main {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
         .query-btn {
             grid-column: 1 / -1;
         }
+    }
+
+    .filter-builder {
+        grid-template-columns: 1fr;
+        align-items: stretch;
+    }
+
+    .condition-add {
+        justify-self: start;
+    }
+}
+
+@media (max-width: 760px) {
+    .controls-main {
+        grid-template-columns: 1fr;
     }
 }
 
@@ -609,22 +769,55 @@ onMounted(init);
     font-size: 12px;
 }
 
-.replay-controls {
+.replay-grid {
     display: flex;
-    gap: 8px;
-    align-items: end;
     flex-wrap: wrap;
+    gap: 10px;
+    align-items: end;
+}
+
+.replay-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+    margin-left: auto;
 }
 
 .field.small {
     min-width: 110px;
 }
 
+.replay-toggle-group {
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+}
+
 .replay-switch-row {
     display: inline-flex;
     align-items: center;
-    gap: 8px;
-    padding-bottom: 2px;
+    justify-content: space-between;
+    gap: 12px;
+    min-height: 34px;
+    padding: 0 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--input-bg);
+}
+
+.replay-grid > .btn {
+    min-width: 120px;
+}
+
+.replay-start {
+    min-width: 132px;
+    font-weight: 700;
+    text-align: center;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
 }
 
 .replay-switch-label {
@@ -632,6 +825,21 @@ onMounted(init);
     font-weight: 700;
     color: var(--text-2);
     white-space: nowrap;
+}
+
+.help-dot {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 15px;
+    height: 15px;
+    margin-left: 4px;
+    border-radius: 50%;
+    border: 1px solid var(--border-strong);
+    color: var(--text-2);
+    font-size: 10px;
+    line-height: 1;
+    cursor: help;
 }
 
 .replay-switch-row .switch {
@@ -686,10 +894,17 @@ onMounted(init);
     margin-top: 8px;
     color: var(--text-2);
     font-size: 12px;
+    padding-top: 8px;
+    border-top: 1px dashed var(--border);
 }
 
 .replay-error {
     color: #fca5a5;
+}
+
+.replay-paused {
+    color: #fcd34d;
+    font-weight: 700;
 }
 
 .split {
@@ -794,6 +1009,10 @@ onMounted(init);
         background: rgba(124, 92, 255, 0.2);
         border-color: rgba(124, 92, 255, 0.55);
     }
+    &.replaying {
+        border-color: rgba(16, 185, 129, 0.45);
+        box-shadow: inset 0 0 0 1px rgba(16, 185, 129, 0.18);
+    }
 
     .t-name {
         font-size: var(--fs-msg-topic);
@@ -838,6 +1057,11 @@ onMounted(init);
     &:hover {
         border-color: var(--border-strong);
         background: var(--card-hover-bg);
+    }
+    &.replaying {
+        border-color: rgba(16, 185, 129, 0.55);
+        background: rgba(16, 185, 129, 0.08);
+        box-shadow: inset 0 0 0 1px rgba(16, 185, 129, 0.18);
     }
 
     .msg-head {
