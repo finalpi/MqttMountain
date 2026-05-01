@@ -83,6 +83,39 @@ export interface HistoryMessage {
     time: number;
 }
 
+export type HistoryKeywordJoin = 'and' | 'or' | 'not';
+
+export interface HistoryKeywordCondition {
+    term: string;
+    join: HistoryKeywordJoin;
+}
+
+export interface HistoryExportRequest {
+    format: 'json' | 'zip';
+    query: Omit<HistoryQueryOptions, 'limit' | 'offset' | 'keyword' | 'keywords' | 'keywordLogic'>;
+    conditions: HistoryKeywordCondition[];
+}
+
+export interface HistoryExportResult {
+    filePath: string;
+    dirPath: string;
+    format: 'json' | 'zip';
+    totalRows: number;
+}
+
+export interface HistoryExportProgress {
+    stage: 'preparing' | 'writing' | 'packaging' | 'done' | 'error';
+    processed: number;
+    written: number;
+    total?: number;
+    percent?: number;
+    rate?: number;
+    message?: string;
+    filePath?: string;
+    dirPath?: string;
+    format?: 'json' | 'zip';
+}
+
 export interface ApiResult<T = unknown> {
     success: boolean;
     message?: string;
@@ -111,6 +144,8 @@ export type IpcChannels = {
     'mqtt:readRecent': (p: { connectionId: string; limit?: number }) => ApiResult<HistoryMessage[]>;
     'mqtt:clearLogs': (connectionId?: string | null) => ApiResult<{ deletedFiles: number }>;
     'history:query': (opts: HistoryQueryOptions) => ApiResult<HistoryMessage[]>;
+    'history:export': (req: HistoryExportRequest) => ApiResult<HistoryExportResult>;
+    'history:openExportDir': (filePath: string) => ApiResult;
     'config:read': () => ApiResult<ConnectionsFile>;
     'config:write': (data: ConnectionsFile) => ApiResult;
     'settings:get': () => ApiResult<AppSettings>;
@@ -131,4 +166,5 @@ export type IpcEvents = {
     'mqtt:state': (p: { connectionId: string; state: 'connected' | 'reconnecting' | 'offline' | 'closed' | 'error'; message?: string }) => void;
     'app:autoDeleteDone': (files: number) => void;
     'window:focused': () => void;
+    'history:exportProgress': (p: HistoryExportProgress) => void;
 };

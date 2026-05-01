@@ -1,11 +1,16 @@
 ﻿
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useConnectionStore } from '@/stores/connection';
 import { useToast } from '@/composables/useToast';
 import { useFormatViewer } from '@/composables/useFormatViewer';
 import { useMqttReplay, type ReplaySpeed } from '@/composables/useMqttReplay';
-import type { HistoryMessage } from '@shared/types';
+import type {
+    HistoryExportProgress,
+    HistoryExportRequest,
+    HistoryKeywordCondition,
+    HistoryMessage
+} from '@shared/types';
 import { datetimeLocalToTs, formatTime, shortTime, tsToDatetimeLocal } from '@/utils/format';
 import { exportMqttxJson, exportGroupedZip } from '@/utils/exporter';
 import { parseReplayFile, replayRowsFromHistory, type ReplayMessage } from '@/utils/replay';
@@ -21,6 +26,21 @@ interface KeywordCondition {
     term: string;
     join: KeywordJoin;
 }
+interface ExportDialogState {
+    open: boolean;
+    running: boolean;
+    stage: HistoryExportProgress['stage'] | 'idle';
+    format: 'json' | 'zip' | null;
+    processed: number;
+    written: number;
+    total: number;
+    percent: number;
+    rate: number;
+    etaSeconds: number;
+    message: string;
+    filePath: string;
+    dirPath: string;
+}
 
 const startTime = ref<string>('');
 const endTime = ref<string>('');
@@ -30,6 +50,12 @@ const rows = ref<HistoryMessage[]>([]);
 const dataSource = ref<'history' | 'imported'>('history');
 const selectedTopic = ref<string | null>(null);
 const loading = ref(false);
+const exporting = ref(false);
+const queryLimit = ref(10000);
+const queryWasCapped = ref(false);
+const detailScrollEl = ref<HTMLElement | null>(null);
+const detailVisibleCount = ref(120);
+const DETAIL_BATCH = 120;
 
 const replayQos = ref<0 | 1 | 2>(0);
 const replayRetain = ref(false);
@@ -42,6 +68,21 @@ const fileInput = ref<HTMLInputElement | null>(null);
 
 type TopicSort = 'name' | 'count' | 'recent';
 const topicSort = ref<TopicSort>('name');
+const exportDialog = ref<ExportDialogState>({
+    open: false,
+    running: false,
+    stage: 'idle',
+    format: null,
+    processed: 0,
+    written: 0,
+    total: 0,
+    percent: 0,
+    rate: 0,
+    etaSeconds: 0,
+    message: '',
+    filePath: '',
+    dirPath: ''
+});
 
 interface TopicGroup {
     topic: string;
@@ -99,6 +140,7 @@ const detail = computed<HistoryMessage[]>(() => {
     const matched = displayRows.value.filter((r) => r.topic === selectedTopic.value);
     return replay.state.running ? matched.slice().reverse() : matched;
 });
+const visibleDetail = computed<HistoryMessage[]>(() => detail.value.slice(0, detailVisibleCount.value));
 const visibleCountLabel = computed(() => displayRows.value.length);
 const dataSourceLabel = computed(() => {
     if (replay.state.running) return `回放预览：${replay.state.sourceName}`;
@@ -125,21 +167,25 @@ function matchesKeywordConditions(row: HistoryMessage): boolean {
 async function query(): Promise<void> {
     const st = datetimeLocalToTs(startTime.value);
     const et = datetimeLocalToTs(endTime.value);
+    queryWasCapped.value = false;
     loading.value = true;
     const r = await window.api.historyQuery({
         connectionId: scope.value === 'current' ? conn.selectedId : null,
         startTime: st || undefined,
         endTime: et || undefined,
-        limit: 500_000
+        limit: queryLimit.value + 1
     });
     loading.value = false;
     if (r.success && r.data) {
-        rows.value = r.data.filter(matchesKeywordConditions);
+        queryWasCapped.value = r.data.length > queryLimit.value;
+        rows.value = r.data.slice(0, queryLimit.value).filter(matchesKeywordConditions);
         dataSource.value = 'history';
         selectedTopic.value = rows.value.length > 0 ? rows.value[0].topic : null;
         if (rows.value.length === 0) toast.info('无匹配结果');
+        else if (queryWasCapped.value) toast.warning(`结果过多，已先展示前 ${rows.value.length} 条，请缩小范围后再查`);
         else toast.success(`找到 ${rows.value.length} 条`);
     } else {
+        queryWasCapped.value = false;
         toast.error('查询失败：' + (r.message || ''));
     }
 }
@@ -222,15 +268,186 @@ function pickQuick(q: Quick): void {
     q.apply();
 }
 
-async function exportJson(): Promise<void> {
+function buildHistoryQueryOptions(limit: number, offset = 0) {
+    const st = datetimeLocalToTs(startTime.value);
+    const et = datetimeLocalToTs(endTime.value);
+    return {
+        connectionId: scope.value === 'current' ? conn.selectedId : null,
+        startTime: st || undefined,
+        endTime: et || undefined,
+        limit,
+        offset
+    } as const;
+}
+
+function buildExportRequest(format: 'json' | 'zip'): HistoryExportRequest {
+    return {
+        format,
+        query: {
+            connectionId: scope.value === 'current' ? conn.selectedId : null,
+            startTime: datetimeLocalToTs(startTime.value) || undefined,
+            endTime: datetimeLocalToTs(endTime.value) || undefined
+        },
+        conditions: keywordConditions.value.map<HistoryKeywordCondition>((item) => ({
+            term: item.term,
+            join: item.join
+        }))
+    };
+}
+
+async function collectRowsForExport(): Promise<HistoryMessage[]> {
+    if (dataSource.value !== 'history') return displayRows.value;
+    const batchSize = 20_000;
+    const all: HistoryMessage[] = [];
+    let offset = 0;
+    while (true) {
+        const r = await window.api.historyQuery(buildHistoryQueryOptions(batchSize, offset));
+        if (!r.success || !r.data) {
+            throw new Error(r.message || '查询历史失败');
+        }
+        const filtered = r.data.filter(matchesKeywordConditions);
+        all.push(...filtered);
+        if (r.data.length < batchSize) break;
+        offset += r.data.length;
+    }
+    return all;
+}
+
+async function withExportRows(action: (rows: HistoryMessage[]) => Promise<void> | void): Promise<void> {
     if (!displayRows.value.length) { toast.warning('没有结果可导出'); return; }
-    exportMqttxJson(displayRows.value, `history-${Date.now()}.json`);
-    toast.success(`已导出 ${displayRows.value.length} 条`);
+    exporting.value = true;
+    try {
+        const exportRows = await collectRowsForExport();
+        if (!exportRows.length) {
+            toast.warning('没有结果可导出');
+            return;
+        }
+        await action(exportRows);
+        toast.success(`已导出 ${exportRows.length} 条`);
+    } catch (error) {
+        toast.error((error as Error).message || '导出失败');
+    } finally {
+        exporting.value = false;
+    }
+}
+
+async function exportJson(): Promise<void> {
+    if (dataSource.value === 'imported') {
+        await withExportRows((exportRows) => {
+            exportMqttxJson(exportRows, `history-${Date.now()}.json`);
+        });
+        return;
+    }
+    await runNativeExport('json');
 }
 async function exportZip(): Promise<void> {
+    if (dataSource.value === 'imported') {
+        await withExportRows(async (exportRows) => {
+            await exportGroupedZip(exportRows, `history-grouped-${Date.now()}.zip`);
+        });
+        return;
+    }
+    await runNativeExport('zip');
+}
+
+function resetExportDialog(format: 'json' | 'zip'): void {
+    exportDialog.value = {
+        open: true,
+        running: true,
+        stage: 'preparing',
+        format,
+        processed: 0,
+        written: 0,
+        total: 0,
+        percent: 0,
+        rate: 0,
+        etaSeconds: 0,
+        message: '正在准备导出任务...',
+        filePath: '',
+        dirPath: ''
+    };
+}
+
+function closeExportDialog(): void {
+    if (exportDialog.value.running) return;
+    exportDialog.value.open = false;
+}
+
+function formatEta(seconds: number): string {
+    if (seconds <= 0) return '即将完成';
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    const s = seconds % 60;
+    if (h > 0) return `${h}小时${m}分`;
+    if (m > 0) return `${m}分${s}秒`;
+    return `${s}秒`;
+}
+
+async function openExportDir(): Promise<void> {
+    if (!exportDialog.value.filePath) return;
+    await window.api.historyOpenExportDir(exportDialog.value.filePath);
+}
+
+async function runNativeExport(format: 'json' | 'zip'): Promise<void> {
     if (!displayRows.value.length) { toast.warning('没有结果可导出'); return; }
-    await exportGroupedZip(displayRows.value, `history-grouped-${Date.now()}.zip`);
-    toast.success(`已导出 ${displayRows.value.length} 条`);
+    if (exporting.value) return;
+    exporting.value = true;
+    resetExportDialog(format);
+    try {
+        const result = await window.api.historyExport(buildExportRequest(format));
+        if (result.success && result.data) {
+            exportDialog.value.running = false;
+            exportDialog.value.stage = 'done';
+            exportDialog.value.filePath = result.data.filePath;
+            exportDialog.value.dirPath = result.data.dirPath;
+            exportDialog.value.written = result.data.totalRows;
+            exportDialog.value.total = Math.max(exportDialog.value.total, result.data.totalRows);
+            exportDialog.value.percent = 100;
+            exportDialog.value.etaSeconds = 0;
+            exportDialog.value.message = `导出完成，共 ${result.data.totalRows.toLocaleString()} 条`;
+            toast.success(`导出完成：${result.data.totalRows} 条`);
+            return;
+        }
+        if (result.message === '已取消导出') {
+            exportDialog.value.running = false;
+            exportDialog.value.stage = 'idle';
+            exportDialog.value.message = '已取消导出';
+            exportDialog.value.open = false;
+            return;
+        }
+        exportDialog.value.running = false;
+        exportDialog.value.stage = 'error';
+        exportDialog.value.message = result.message || '导出失败';
+        toast.error(exportDialog.value.message);
+    } catch (error) {
+        exportDialog.value.running = false;
+        exportDialog.value.stage = 'error';
+        exportDialog.value.message = (error as Error).message || '导出失败';
+        toast.error(exportDialog.value.message);
+    } finally {
+        exporting.value = false;
+    }
+}
+
+function resetDetailWindow(): void {
+    detailVisibleCount.value = DETAIL_BATCH;
+    nextTick(() => {
+        const el = detailScrollEl.value;
+        if (el) el.scrollTop = 0;
+    });
+}
+
+function loadMoreDetail(): void {
+    if (detailVisibleCount.value >= detail.value.length) return;
+    detailVisibleCount.value = Math.min(detail.value.length, detailVisibleCount.value + DETAIL_BATCH);
+}
+
+function onDetailScroll(): void {
+    const el = detailScrollEl.value;
+    if (!el) return;
+    if (el.scrollTop + el.clientHeight >= el.scrollHeight - 160) {
+        loadMoreDetail();
+    }
 }
 
 async function startReplayRows(sourceName: string, replayRows: ReplayMessage[]): Promise<void> {
@@ -282,6 +499,7 @@ async function onImportChange(event: Event): Promise<void> {
         importedRows.value = await parseReplayFile(file);
         importedName.value = file.name;
         dataSource.value = 'imported';
+        queryWasCapped.value = false;
         selectedTopic.value = importedHistoryRows.value[0]?.topic ?? null;
         toast.success(`已导入 ${importedRows.value.length} 条回放数据`);
     } catch (error) {
@@ -307,6 +525,38 @@ async function replayPreferredRows(): Promise<void> {
 
 onMounted(init);
 
+const offHistoryExportProgress = window.api.onHistoryExportProgress((progress) => {
+    if (!exportDialog.value.open) return;
+    exportDialog.value.stage = progress.stage;
+    exportDialog.value.processed = progress.processed;
+    exportDialog.value.written = progress.written;
+    exportDialog.value.total = progress.total ?? exportDialog.value.total;
+    exportDialog.value.percent = progress.percent ?? exportDialog.value.percent;
+    exportDialog.value.rate = progress.rate ?? exportDialog.value.rate;
+    if (exportDialog.value.total > 0 && exportDialog.value.rate > 0) {
+        exportDialog.value.etaSeconds = Math.max(
+            0,
+            Math.round((exportDialog.value.total - exportDialog.value.processed) / exportDialog.value.rate)
+        );
+    }
+    exportDialog.value.message = progress.message || exportDialog.value.message;
+    if (progress.filePath) exportDialog.value.filePath = progress.filePath;
+    if (progress.dirPath) exportDialog.value.dirPath = progress.dirPath;
+    if (progress.stage === 'done' || progress.stage === 'error') {
+        exportDialog.value.running = false;
+    }
+});
+
+onBeforeUnmount(() => {
+    offHistoryExportProgress();
+});
+
+watch(
+    () => [selectedTopic.value, replay.state.running, displayRows.value.length] as const,
+    () => resetDetailWindow(),
+    { flush: 'post' }
+);
+
 watch(
     () => replay.state.running,
     (running) => {
@@ -323,8 +573,12 @@ watch(
         <div class="panel-head">
             <h2>历史查询</h2>
             <span class="spacer"></span>
-            <button v-if="displayRows.length" class="btn btn-mini" @click="exportJson" title="导出完整 JSON">导出 JSON</button>
-            <button v-if="displayRows.length" class="btn btn-mini" @click="exportZip" title="按主题分组 ZIP">导出 ZIP</button>
+            <button v-if="displayRows.length" class="btn btn-mini" :disabled="exporting" @click="exportJson" title="导出完整 JSON">
+                {{ exporting ? '导出中...' : '导出 JSON' }}
+            </button>
+            <button v-if="displayRows.length" class="btn btn-mini" :disabled="exporting" @click="exportZip" title="按主题分组 ZIP">
+                {{ exporting ? '导出中...' : '导出 ZIP' }}
+            </button>
         </div>
         <div class="panel-body">
             <div class="controls">
@@ -345,6 +599,16 @@ watch(
                         <select v-model="scope" @keydown.enter="query">
                             <option value="current">当前连接</option>
                             <option value="all">全部连接</option>
+                        </select>
+                    </div>
+                    <div class="field">
+                        <label>结果上限</label>
+                        <select v-model.number="queryLimit" @keydown.enter="query">
+                            <option :value="2000">2,000</option>
+                            <option :value="5000">5,000</option>
+                            <option :value="10000">10,000</option>
+                            <option :value="20000">20,000</option>
+                            <option :value="50000">50,000</option>
                         </select>
                     </div>
                     <button class="btn btn-primary query-btn" :disabled="loading" @click="query">
@@ -380,6 +644,9 @@ watch(
                     :class="{ active: activeQuick === q.key }"
                     @click="pickQuick(q)"
                 >{{ q.label }}</button>
+            </div>
+            <div v-if="queryWasCapped && !loading" class="query-note">
+                当前结果已触达上限 {{ queryLimit.toLocaleString() }} 条。建议缩小时间范围、限定连接或增加关键字后再查。
             </div>
 
             <div class="replay-panel">
@@ -498,15 +765,15 @@ watch(
                     <div class="t-head">
                         <template v-if="selectedTopic">
                             <span class="t-head-name" :title="selectedTopic">{{ selectedTopic }}</span>
-                            <span class="t-head-count">{{ detail.length }} 条</span>
+                            <span class="t-head-count">{{ visibleDetail.length }} / {{ detail.length }} 条</span>
                         </template>
                         <span v-else class="sub-empty">请从左侧选择主题</span>
                     </div>
-                    <div v-if="selectedTopic" class="scroll-area">
+                    <div v-if="selectedTopic" ref="detailScrollEl" class="scroll-area" @scroll.passive="onDetailScroll">
                         <div v-if="detail.length === 0" class="empty small">该主题无匹配消息</div>
                         <div v-else class="msg-list">
                             <div
-                                v-for="m in detail"
+                                v-for="m in visibleDetail"
                                 :key="m.topic + '|' + m.time + '|' + m.payload.length"
                                 class="msg-card cv-auto"
                                 @contextmenu.prevent="formatViewer.open({ topic: m.topic, time: m.time, raw: m.payload })"
@@ -517,7 +784,54 @@ watch(
                                 </div>
                                 <pre class="msg-body" v-html="highlight(m.payload, keywordConditions.map((item) => item.term))"></pre>
                             </div>
+                            <button
+                                v-if="visibleDetail.length < detail.length"
+                                class="load-more-btn"
+                                @click="loadMoreDetail"
+                            >加载更多</button>
                         </div>
+                    </div>
+                </div>
+            </div>
+
+            <div v-if="exportDialog.open" class="export-overlay" @click.self="closeExportDialog">
+                <div class="export-modal">
+                    <div class="export-title-row">
+                        <div>
+                            <h3>导出历史数据</h3>
+                            <p>{{ exportDialog.format === 'zip' ? '按主题打包为 ZIP' : '导出为 JSON 文件' }}</p>
+                        </div>
+                        <button class="export-close" :disabled="exportDialog.running" @click="closeExportDialog">×</button>
+                    </div>
+                    <div class="export-progress-shell" :class="{ done: exportDialog.stage === 'done', error: exportDialog.stage === 'error' }">
+                        <div
+                            class="export-progress-bar"
+                            :class="{ running: exportDialog.running && exportDialog.percent <= 0 }"
+                            :style="exportDialog.percent > 0 ? { width: `${Math.max(6, exportDialog.percent)}%` } : undefined"
+                        ></div>
+                    </div>
+                    <div class="export-stats">
+                        <span>已扫描 {{ exportDialog.processed.toLocaleString() }} 条</span>
+                        <span>已写入 {{ exportDialog.written.toLocaleString() }} 条</span>
+                    </div>
+                    <div class="export-stats">
+                        <span>{{ exportDialog.total ? `总量 ${exportDialog.total.toLocaleString()} 条` : '正在统计总量...' }}</span>
+                        <span>{{ exportDialog.rate ? `${Math.round(exportDialog.rate).toLocaleString()} 条/秒` : '计算速率中...' }}</span>
+                    </div>
+                    <div class="export-stats">
+                        <span>{{ exportDialog.percent ? `已完成 ${Math.round(exportDialog.percent)}%` : '正在计算进度...' }}</span>
+                        <span>{{ exportDialog.rate && exportDialog.total ? `预计剩余 ${formatEta(exportDialog.etaSeconds)}` : '预计时间计算中...' }}</span>
+                    </div>
+                    <div class="export-percent">{{ Math.round(exportDialog.percent) }}%</div>
+                    <div class="export-message">{{ exportDialog.message || '正在导出...' }}</div>
+                    <div v-if="exportDialog.filePath" class="export-path" :title="exportDialog.filePath">{{ exportDialog.filePath }}</div>
+                    <div class="export-actions">
+                        <button
+                            class="btn"
+                            :disabled="!exportDialog.filePath || exportDialog.running"
+                            @click="openExportDir"
+                        >打开目标目录</button>
+                        <button class="btn btn-primary" :disabled="exportDialog.running" @click="closeExportDialog">完成</button>
                     </div>
                 </div>
             </div>
@@ -528,6 +842,7 @@ watch(
 <style lang="scss" scoped>
 .panel-body {
     min-height: 0;
+    position: relative;
 }
 
 .controls {
@@ -539,7 +854,7 @@ watch(
 
 .controls-main {
     display: grid;
-    grid-template-columns: minmax(220px, 1fr) minmax(220px, 1fr) minmax(140px, 180px) auto;
+    grid-template-columns: minmax(220px, 1fr) minmax(220px, 1fr) minmax(140px, 180px) minmax(120px, 140px) auto;
     gap: 8px;
     align-items: end;
 
@@ -746,6 +1061,16 @@ watch(
             color: #fff;
         }
     }
+}
+
+.query-note {
+    margin: 2px 0 10px;
+    padding: 8px 10px;
+    border: 1px solid rgba(245, 158, 11, 0.28);
+    border-radius: 8px;
+    background: rgba(245, 158, 11, 0.08);
+    color: #fcd34d;
+    font-size: 12px;
 }
 
 .replay-panel {
@@ -1046,6 +1371,21 @@ watch(
     gap: 6px;
 }
 
+.load-more-btn {
+    height: 34px;
+    border: 1px dashed var(--border-strong);
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.02);
+    color: var(--text-2);
+    font-family: inherit;
+    cursor: pointer;
+
+    &:hover {
+        color: var(--text-0);
+        background: var(--card-hover-bg);
+    }
+}
+
 .msg-card {
     padding: 8px 10px;
     border-radius: 8px;
@@ -1107,6 +1447,143 @@ watch(
 
     &.small {
         padding: 16px 10px;
+    }
+}
+
+.export-overlay {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    background: rgba(2, 6, 23, 0.52);
+    backdrop-filter: blur(4px);
+    z-index: 30;
+}
+
+.export-modal {
+    width: min(520px, calc(100% - 32px));
+    padding: 18px;
+    border-radius: 16px;
+    border: 1px solid var(--border-strong);
+    background: linear-gradient(180deg, rgba(15, 23, 42, 0.98), rgba(15, 23, 42, 0.94));
+    box-shadow: 0 30px 80px rgba(0, 0, 0, 0.35);
+}
+
+.export-title-row {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 14px;
+
+    h3 {
+        margin: 0;
+        font-size: 18px;
+        color: var(--text-0);
+    }
+
+    p {
+        margin: 4px 0 0;
+        font-size: 12px;
+        color: var(--text-3);
+    }
+}
+
+.export-close {
+    width: 30px;
+    height: 30px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: transparent;
+    color: var(--text-2);
+    font-size: 18px;
+    cursor: pointer;
+}
+
+.export-progress-shell {
+    position: relative;
+    height: 14px;
+    overflow: hidden;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: rgba(255, 255, 255, 0.05);
+
+    &.done .export-progress-bar {
+        width: 100%;
+        animation: none;
+        background: linear-gradient(90deg, #22c55e, #4ade80);
+    }
+
+    &.error .export-progress-bar {
+        width: 100%;
+        animation: none;
+        background: linear-gradient(90deg, #ef4444, #f87171);
+    }
+}
+
+.export-progress-bar {
+    position: absolute;
+    inset: 0 auto 0 0;
+    width: 42%;
+    border-radius: inherit;
+    background: linear-gradient(90deg, rgba(91, 141, 239, 0.9), rgba(124, 92, 255, 0.95), rgba(91, 141, 239, 0.9));
+    background-size: 220px 100%;
+
+    &.running {
+        animation: export-slide 1.2s linear infinite;
+    }
+}
+
+.export-stats {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    margin-top: 12px;
+    color: var(--text-2);
+    font-size: 12px;
+    font-family: 'JetBrains Mono', Consolas, monospace;
+}
+
+.export-message {
+    margin-top: 10px;
+    color: var(--text-1);
+    font-size: 13px;
+    line-height: 1.5;
+}
+
+.export-percent {
+    margin-top: 10px;
+    color: var(--text-0);
+    font-size: 22px;
+    font-weight: 700;
+    font-family: 'JetBrains Mono', Consolas, monospace;
+}
+
+.export-path {
+    margin-top: 10px;
+    padding: 10px 12px;
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    color: var(--text-3);
+    font-size: 12px;
+    font-family: 'JetBrains Mono', Consolas, monospace;
+    word-break: break-all;
+}
+
+.export-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 16px;
+}
+
+@keyframes export-slide {
+    0% {
+        transform: translateX(-55%);
+    }
+    100% {
+        transform: translateX(240%);
     }
 }
 </style>

@@ -3,6 +3,9 @@ import type {
     AppSettings,
     ConnectionsFile,
     ConnectPayload,
+    HistoryExportProgress,
+    HistoryExportRequest,
+    HistoryExportResult,
     HistoryQueryOptions,
     HistoryMessage,
     MqttMessage,
@@ -30,6 +33,8 @@ const api = {
         invoke<{ deletedFiles: number }>('mqtt:clearLogs', connectionId),
 
     historyQuery: (opts: HistoryQueryOptions) => invoke<HistoryMessage[]>('history:query', opts),
+    historyExport: (req: HistoryExportRequest) => invoke<HistoryExportResult>('history:export', req),
+    historyOpenExportDir: (filePath: string) => invoke('history:openExportDir', filePath),
 
     configRead: () => invoke<ConnectionsFile>('config:read'),
     configWrite: (data: ConnectionsFile) => invoke('config:write', data),
@@ -96,6 +101,11 @@ const api = {
         const listener = () => cb();
         ipcRenderer.on('window:focused', listener);
         return () => ipcRenderer.removeListener('window:focused', listener);
+    },
+    onHistoryExportProgress: (cb: (p: HistoryExportProgress) => void) => {
+        const listener = (_e: IpcRendererEvent, p: HistoryExportProgress) => cb(p);
+        ipcRenderer.on('history:exportProgress', listener);
+        return () => ipcRenderer.removeListener('history:exportProgress', listener);
     }
 };
 

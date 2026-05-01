@@ -19,7 +19,7 @@ export function exportMqttxJson(rows: { topic: string; payload: string; time: nu
         QoS: 0,
         Retain: false
     }));
-    const blob = new Blob([JSON.stringify(list, null, 2)], { type: 'application/json;charset=utf-8' });
+    const blob = new Blob([JSON.stringify(list)], { type: 'application/json;charset=utf-8' });
     triggerDownload(blob, filename);
 }
 

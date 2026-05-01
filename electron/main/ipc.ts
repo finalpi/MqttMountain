@@ -6,6 +6,7 @@ import type {
     AppSettings,
     ConnectionsFile,
     ConnectPayload,
+    HistoryExportRequest,
     HistoryQueryOptions,
     PublishPayload
 } from '../../shared/types';
@@ -27,6 +28,7 @@ import { APP_START_TIME } from './constants';
 import { pluginManager } from './plugin-manager';
 import { appendPublishHistory, readPublishHistory } from './publish-history';
 import { checkForUpdates, openReleasesPage } from './update-service';
+import { exportHistoryToFile } from './history-export';
 
 function win(): BrowserWindow | null {
     return BrowserWindow.getAllWindows()[0] ?? null;
@@ -77,6 +79,34 @@ export function initIpc(mqttService: MqttService): void {
     ipcMain.handle('history:query', (_e, opts: HistoryQueryOptions) => {
         try {
             return { success: true, data: queryHistory(opts || {}) };
+        } catch (e) {
+            return { success: false, message: (e as Error).message };
+        }
+    });
+    ipcMain.handle('history:export', async (event, req: HistoryExportRequest) => {
+        try {
+            const defaultName = `history-${Date.now()}.${req.format === 'zip' ? 'zip' : 'json'}`;
+            const picked = await dialog.showSaveDialog(win() ?? undefined!, {
+                title: req.format === 'zip' ? '导出历史 ZIP' : '导出历史 JSON',
+                defaultPath: path.join(app.getPath('downloads'), defaultName),
+                filters: req.format === 'zip'
+                    ? [{ name: 'ZIP 文件', extensions: ['zip'] }]
+                    : [{ name: 'JSON 文件', extensions: ['json'] }]
+            });
+            if (picked.canceled || !picked.filePath) {
+                return { success: false, message: '已取消导出' };
+            }
+            const result = await exportHistoryToFile(event.sender, req, picked.filePath);
+            return { success: true, data: result };
+        } catch (e) {
+            return { success: false, message: (e as Error).message };
+        }
+    });
+    ipcMain.handle('history:openExportDir', async (_e, filePath: string) => {
+        try {
+            if (!filePath || !filePath.trim()) return { success: false, message: '文件路径为空' };
+            shell.showItemInFolder(filePath);
+            return { success: true };
         } catch (e) {
             return { success: false, message: (e as Error).message };
         }

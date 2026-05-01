@@ -24,6 +24,10 @@ export default defineConfig(({ command }) => {
                             minify: isBuild,
                             outDir: 'dist-electron/main',
                             rollupOptions: {
+                                input: {
+                                    index: path.resolve(__dirname, 'electron/main/index.ts'),
+                                    'history-export-worker': path.resolve(__dirname, 'electron/main/history-export-worker.ts')
+                                },
                                 external: ['electron', 'better-sqlite3', 'mqtt']
                             }
                         }

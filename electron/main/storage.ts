@@ -344,38 +344,65 @@ export function queryHistory(opts: HistoryQueryOptions): HistoryMessage[] {
 
     const secMin = Math.floor(Math.max(st, -8640000000) / 1000);
     const secMax = Math.ceil(Math.min(et, 8640000000000) / 1000);
-    const all: HistoryMessage[] = [];
+    const bucketChunkSize = 256;
+    const out: HistoryMessage[] = [];
+    let skipped = 0;
 
     for (const fe of files) {
+        if (out.length >= limit) break;
         const db = new Database(fe.path, { readonly: true });
         try {
-            let sql = 'SELECT bucket_ts, topic, blob FROM buckets WHERE bucket_ts BETWEEN ? AND ?';
-            const params: (number | string)[] = [secMin, secMax];
-            if (topicFilter) { sql += ' AND topic = ?'; params.push(topicFilter); }
-            sql += ' ORDER BY bucket_ts DESC';
-            const rows = db.prepare(sql).all(...params) as { bucket_ts: number; topic: string; blob: Buffer }[];
-            for (const r of rows) {
-                const decoded = decodeBucket(r.blob, r.bucket_ts, r.topic);
-                for (let j = decoded.length - 1; j >= 0; j--) {
-                    const m = decoded[j];
-                    if (m.time < st || m.time > et) continue;
-                    if (terms.length) {
-                        const hay = (m.topic + m.payload).replace(/\s+/gu, '').toLowerCase();
-                        const hit = keywordLogic === 'or'
-                            ? terms.some((term) => hay.includes(term))
-                            : terms.every((term) => hay.includes(term));
-                        if (!hit) continue;
-                    }
-                    m.connectionId = fe.san;
-                    all.push(m);
+            let lastBucketTs: number | null = null;
+            let lastTopic: string | null = null;
+            while (out.length < limit) {
+                let sql = 'SELECT bucket_ts, topic, blob FROM buckets WHERE bucket_ts BETWEEN ? AND ?';
+                const params: (number | string)[] = [secMin, secMax];
+                if (topicFilter) {
+                    sql += ' AND topic = ?';
+                    params.push(topicFilter);
                 }
+                if (lastBucketTs != null && lastTopic != null) {
+                    sql += ' AND (bucket_ts < ? OR (bucket_ts = ? AND topic < ?))';
+                    params.push(lastBucketTs, lastBucketTs, lastTopic);
+                }
+                sql += ' ORDER BY bucket_ts DESC, topic DESC LIMIT ?';
+                params.push(bucketChunkSize);
+
+                const rows = db.prepare(sql).all(...params) as { bucket_ts: number; topic: string; blob: Buffer }[];
+                if (rows.length === 0) break;
+
+                for (const r of rows) {
+                    const decoded = decodeBucket(r.blob, r.bucket_ts, r.topic);
+                    for (let j = decoded.length - 1; j >= 0; j--) {
+                        const m = decoded[j];
+                        if (m.time < st || m.time > et) continue;
+                        if (terms.length) {
+                            const hay = (m.topic + m.payload).replace(/\s+/gu, '').toLowerCase();
+                            const hit = keywordLogic === 'or'
+                                ? terms.some((term) => hay.includes(term))
+                                : terms.every((term) => hay.includes(term));
+                            if (!hit) continue;
+                        }
+                        if (skipped < offset) {
+                            skipped++;
+                            continue;
+                        }
+                        m.connectionId = fe.san;
+                        out.push(m);
+                        if (out.length >= limit) break;
+                    }
+                    if (out.length >= limit) break;
+                }
+
+                const tail = rows[rows.length - 1];
+                lastBucketTs = tail.bucket_ts;
+                lastTopic = tail.topic;
             }
         } finally {
             db.close();
         }
     }
-    all.sort((a, b) => b.time - a.time);
-    return all.slice(offset, offset + limit);
+    return out;
 }
 
 // ---------------- clear ----------------
